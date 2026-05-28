@@ -1,1 +1,43 @@
-hhu
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Output artifacts
+eod_report.xlsx
+*_signals.csv
+*_portfolio.csv
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage / testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Env files
+.env
+.env.local
