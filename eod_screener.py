@@ -157,6 +157,149 @@ def get_default_config() -> dict:
 
 
 # ==============================================================================
+# STRATEGY PROFILES  --  Murphy-inspired presets
+# ==============================================================================
+# Each profile overrides Module 2 (screener) settings to match the strategy.
+# Macro module is left untouched so the user can decide which environment to filter.
+STRATEGY_PROFILES = {
+    "custom": {
+        "label": "🛠️ Custom (your sidebar settings)",
+        "description": "Use the toggles and sliders in the sidebar exactly as configured.",
+    },
+    "breakout": {
+        "label": "🚀 Profile 1: Pure Momentum Breakout",
+        "description": (
+            "Catches stocks exploding out of consolidation on heavy volume. "
+            "Ride the wave with institutional money. Murphy: in trends, MAs rule and "
+            "RSI is irrelevant (it stays overbought all the way up)."
+        ),
+        "screener": {
+            # MA alignment ON: 20 > 50 (trend)
+            "ma_alignment_enabled": True,
+            "ma_lengths":           [20, 50],
+            "ma_type":              "sma",
+            # Keltner breakout ON, tight multiplier
+            "keltner_enabled":           True,
+            "keltner_ema_length":        20,
+            "keltner_atr_length":        20,
+            "keltner_multiplier":        1.5,
+            "keltner_breakout_lookback": 5,
+            # Volume surge ON, aggressive
+            "volume_surge_enabled": True,
+            "volume_multiplier":    1.25,
+            "volume_sma_length":    20,
+            # OBV ON (smart money confirmation)
+            "obv_enabled":   True,
+            "obv_lookback":  20,
+            # RSI divergence OFF (Murphy: RSI is irrelevant in strong trends)
+            "divergence_enabled": False,
+            # Whipsaw filter ON (avoid false breakouts)
+            "whipsaw_enabled": True,
+            "whipsaw_pct":     0.01,
+            # Profile-specific triggers OFF
+            "pullback_enabled": False,
+            "reversal_enabled": False,
+        },
+        "risk": {
+            "atr_stop_multiplier": 2.0,  # wide stop for volatility
+            "min_rr_ratio":        3.0,
+        },
+    },
+    "pullback": {
+        "label": "📉 Profile 2: Pullback / Dip Buy in Uptrend",
+        "description": (
+            "Safer, conservative entry: buy a healthy stock that's resting on its "
+            "50-SMA support while RSI cools off. Murphy: markets move in waves — "
+            "buy the support, don't chase highs."
+        ),
+        "screener": {
+            # MA alignment uses only 50-SMA (price > 50 SMA, no 20/50/200 strict order)
+            "ma_alignment_enabled": False,  # we use the pullback trigger instead
+            "ma_lengths":           [50],
+            "ma_type":              "sma",
+            # Keltner OFF (we're not looking for a breakout)
+            "keltner_enabled": False,
+            # Volume surge OFF or very low (pullbacks have low volume)
+            "volume_surge_enabled": False,
+            "volume_multiplier":    1.0,
+            "volume_sma_length":    20,
+            # OBV optional
+            "obv_enabled":  False,
+            "obv_lookback": 20,
+            # RSI divergence OFF (we WANT RSI to be low)
+            "divergence_enabled": False,
+            # Whipsaw OFF (no breakout to filter)
+            "whipsaw_enabled": False,
+            # Pullback trigger ON
+            "pullback_enabled":        True,
+            "pullback_tolerance_pct":  0.03,   # within 3% of 50-SMA
+            "rsi_cooldown_lookback":   10,
+            "rsi_length":              14,
+            "reversal_enabled":        False,
+        },
+        "risk": {
+            "atr_stop_multiplier": 1.5,  # tighter stop below the 50-SMA
+            "min_rr_ratio":        3.0,
+        },
+    },
+    "reversal": {
+        "label": "🔄 Profile 3: Range Reversal / Oversold Bounce",
+        "description": (
+            "Stocks that crashed or chopped down to concrete-floor support, where "
+            "institutions are quietly accumulating. Murphy: in ranges, MAs are "
+            "useless (whipsaws) — RSI and volatility bands take over."
+        ),
+        "screener": {
+            # MA alignment OFF entirely (Murphy's rule for ranges)
+            "ma_alignment_enabled": False,
+            "ma_lengths":           [],
+            "ma_type":              "sma",
+            # Keltner is used INVERSELY via reversal trigger; the standard upper-band
+            # breakout check is OFF
+            "keltner_enabled":           False,
+            "keltner_ema_length":        20,
+            "keltner_atr_length":        20,
+            "keltner_multiplier":        2.0,
+            "keltner_breakout_lookback": 5,
+            # Volume surge ON (smart money accumulating at the bottom)
+            "volume_surge_enabled": True,
+            "volume_multiplier":    1.30,
+            "volume_sma_length":    20,
+            # OBV optional
+            "obv_enabled":  False,
+            "obv_lookback": 20,
+            # RSI divergence OFF (we want oversold cross, not divergence)
+            "divergence_enabled": False,
+            # Whipsaw OFF
+            "whipsaw_enabled": False,
+            # Reversal trigger ON
+            "pullback_enabled":  False,
+            "reversal_enabled":  True,
+            "reversal_lookback": 5,
+            "rsi_length":        14,
+        },
+        "risk": {
+            "atr_stop_multiplier": 1.0,  # tight stop below absolute low
+            "min_rr_ratio":        3.0,
+        },
+    },
+}
+
+
+def apply_strategy_profile(cfg: dict, profile_key: str) -> dict:
+    """Override cfg with a strategy profile's settings. 'custom' leaves cfg alone."""
+    if profile_key not in STRATEGY_PROFILES or profile_key == "custom":
+        return cfg
+    profile = STRATEGY_PROFILES[profile_key]
+    if "screener" in profile:
+        cfg["screener"].update(profile["screener"])
+    if "risk" in profile:
+        cfg["risk"].update(profile["risk"])
+    cfg["_active_profile"] = profile_key
+    return cfg
+
+
+# ==============================================================================
 # DATA FETCHING  --  batched for speed
 # ==============================================================================
 def _flatten_yf(df: pd.DataFrame, ticker: Optional[str] = None) -> Optional[pd.DataFrame]:
@@ -280,6 +423,7 @@ def add_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     out["EMA_K"]    = ta.ema(out["Close"], length=sc["keltner_ema_length"])
     out["ATR_K"]    = ta.atr(out["High"], out["Low"], out["Close"], length=sc["keltner_atr_length"])
     out["KC_UPPER"] = out["EMA_K"] + sc["keltner_multiplier"] * out["ATR_K"]
+    out["KC_LOWER"] = out["EMA_K"] - sc["keltner_multiplier"] * out["ATR_K"]
     out["VOL_SMA"]  = ta.sma(out["Volume"], length=sc["volume_sma_length"])
     out["RSI"]      = ta.rsi(out["Close"], length=sc["rsi_length"])
     out["ATR_R"]    = ta.atr(out["High"], out["Low"], out["Close"], length=rk["atr_length"])
@@ -511,8 +655,96 @@ def screen_stock(df: pd.DataFrame, cfg: dict) -> tuple[bool, dict]:
         "volume_surge":     check_volume_surge(df, cfg),
         "whipsaw_filter":   check_whipsaw_filter(df, cfg),
         "divergence_ok":    check_divergence_blocker(df, cfg),
+        "pullback_trigger": check_pullback_trigger(df, cfg),
+        "reversal_trigger": check_reversal_trigger(df, cfg),
     }
     return all(checks.values()), checks
+
+
+# ==============================================================================
+# PROFILE-SPECIFIC TRIGGERS  (Pullback, Reversal)
+# ==============================================================================
+def check_pullback_trigger(df: pd.DataFrame, cfg: dict) -> bool:
+    """
+    Pullback in uptrend trigger (Murphy's classic dip-buy):
+      - Price must be near (within `pullback_tolerance_pct`) the 50-SMA.
+      - Price is above the 50-SMA (uptrend still intact).
+      - RSI dipped below 50 in the last `rsi_cooldown_lookback` bars AND is now
+        turning back up (today's RSI > yesterday's RSI).
+    """
+    sc = cfg["screener"]
+    if not sc.get("pullback_enabled", False):
+        return True
+    if len(df) < 60:
+        return False
+
+    # Need a 50-SMA column
+    sma50_col = "MA_50"
+    if sma50_col not in df.columns or pd.isna(df[sma50_col].iloc[-1]):
+        return False
+
+    last = df.iloc[-1]
+    sma50 = float(last[sma50_col])
+    price = float(last["Close"])
+
+    # Uptrend intact
+    if price <= sma50:
+        return False
+
+    # Near the SMA50 (within tolerance %)
+    tol = sc.get("pullback_tolerance_pct", 0.03)
+    if (price - sma50) / sma50 > tol:
+        return False
+
+    # RSI cooled and now turning up
+    lb = sc.get("rsi_cooldown_lookback", 10)
+    rsi = df["RSI"].iloc[-lb:]
+    if pd.isna(rsi.iloc[-1]) or pd.isna(rsi.iloc[-2]):
+        return False
+    if rsi.min() >= 50:
+        return False  # never cooled
+    if rsi.iloc[-1] <= rsi.iloc[-2]:
+        return False  # not turning up
+    return True
+
+
+def check_reversal_trigger(df: pd.DataFrame, cfg: dict) -> bool:
+    """
+    Range / oversold reversal trigger (Linda Raschke / Murphy oscillator setup):
+      - Within the last `reversal_lookback` bars, the LOW dipped below the
+        lower Keltner band (extreme oversold).
+      - Today the close is back inside the Keltner channel (above lower band).
+      - RSI is currently above 30 and was below 30 within the lookback
+        (oversold cross from below).
+    """
+    sc = cfg["screener"]
+    if not sc.get("reversal_enabled", False):
+        return True
+    if len(df) < 30:
+        return False
+    if "KC_LOWER" not in df.columns:
+        return False
+
+    lb = sc.get("reversal_lookback", 5)
+    window = df.iloc[-lb - 1:]
+    last = df.iloc[-1]
+
+    # Back inside channel today
+    if pd.isna(last["KC_LOWER"]) or last["Close"] <= last["KC_LOWER"]:
+        return False
+
+    # At some point in the window, the LOW pierced the lower band
+    pierced = (window["Low"] < window["KC_LOWER"]).any()
+    if not pierced:
+        return False
+
+    # RSI: was oversold, now recovered
+    rsi_window = df["RSI"].iloc[-lb - 1:]
+    if pd.isna(last["RSI"]) or last["RSI"] <= 30:
+        return False
+    if (rsi_window < 30).sum() == 0:
+        return False
+    return True
 
 
 # ==============================================================================
@@ -594,6 +826,7 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dic
         "evaluated": 0, "sector_rs_ok": 0,
         "ma_alignment": 0, "obv_breakout": 0, "keltner_breakout": 0,
         "volume_surge": 0, "whipsaw_filter": 0, "divergence_ok": 0,
+        "pullback_trigger": 0, "reversal_trigger": 0,
         "all_filters_ok": 0, "valid_stop": 0, "rr_ok": 0, "final": 0,
     }
 
@@ -617,6 +850,8 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dic
             "volume_surge":     check_volume_surge(df, cfg),
             "whipsaw_filter":   check_whipsaw_filter(df, cfg),
             "divergence_ok":    check_divergence_blocker(df, cfg),
+            "pullback_trigger": check_pullback_trigger(df, cfg),
+            "reversal_trigger": check_reversal_trigger(df, cfg),
         }
         for k, v in checks.items():
             if v:
