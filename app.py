@@ -22,6 +22,7 @@ import streamlit as st
 
 from eod_screener import (
     get_default_config,
+    get_macro_snapshot,
     load_portfolio,
     load_universe,
     run_scanner,
@@ -52,6 +53,15 @@ UNIVERSE_DIR = "universes"
 @st.cache_data(show_spinner=False)
 def _load_universe_cached(path: str) -> list[str]:
     return load_universe(path)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _macro_snapshot_cached(spy_sma_len: int, vix_threshold: float) -> dict:
+    """Cached for 10 minutes so reopening the page doesn't re-download."""
+    cfg = get_default_config()
+    cfg["macro"]["spy_sma_length"]      = spy_sma_len
+    cfg["macro"]["vix_ratio_threshold"] = vix_threshold
+    return get_macro_snapshot(cfg)
 
 
 def _to_excel_bytes(new_signals: pd.DataFrame,
@@ -119,8 +129,11 @@ with st.sidebar:
 
     # ---- Equity & risk ------------------------------------------------------
     st.subheader("Account")
-    total_equity      = st.number_input("Total equity ($)", min_value=1_000.0,
-                                        value=100_000.0, step=1_000.0)
+    total_equity      = st.slider("Total equity ($)",
+                                  min_value=1_000, max_value=50_000,
+                                  value=10_000, step=500,
+                                  help="Your total trading account size. "
+                                       "The screener uses this to size positions.")
     risk_per_trade    = st.slider("Risk per trade (%)", 0.1, 5.0, 2.0, 0.1) / 100
 
     # ---- Macro module -------------------------------------------------------
@@ -172,6 +185,87 @@ with st.sidebar:
 
     history_period    = st.selectbox("History to download",
                                      ["1y", "2y", "5y"], index=1)
+
+
+# ==============================================================================
+# Main area -- Market State panel (always visible)
+# ==============================================================================
+st.subheader("🌍 Market State")
+st.caption("Check the broader market BEFORE deciding to scan. Refreshes every 10 minutes.")
+
+ms_col1, ms_col2, ms_col3, ms_col4 = st.columns(4)
+refresh_col1, refresh_col2 = st.columns([4, 1])
+
+with st.spinner("Loading market state..."):
+    try:
+        snap = _macro_snapshot_cached(int(spy_sma), float(vix_threshold))
+    except Exception as e:
+        snap = None
+        st.error(f"Could not load market state: {e}")
+
+if snap:
+    # --- SPY trend
+    with ms_col1:
+        if snap["spy_price"] and snap["spy_sma"]:
+            delta_pct = (snap["spy_price"] / snap["spy_sma"] - 1) * 100
+            st.metric(
+                f"SPY vs SMA{snap['spy_sma_len']}",
+                f"${snap['spy_price']:.2f}",
+                f"{delta_pct:+.2f}% vs SMA",
+                delta_color="normal",
+            )
+        else:
+            st.metric("SPY", "N/A")
+
+    # --- VIX (Fear gauge)
+    with ms_col2:
+        if snap["vix"] is not None:
+            # VIX color logic
+            if snap["vix"] < 15:
+                vix_label = "🟢 Calm"
+            elif snap["vix"] < 20:
+                vix_label = "🟡 Normal"
+            elif snap["vix"] < 30:
+                vix_label = "🟠 Elevated"
+            else:
+                vix_label = "🔴 Fear"
+            st.metric("VIX (Fear Index)", f"{snap['vix']:.2f}", vix_label,
+                      delta_color="off")
+        else:
+            st.metric("VIX", "N/A")
+
+    # --- VIX/VXV term structure
+    with ms_col3:
+        if snap["vix_ratio"] is not None:
+            ratio_label = "🟢 Contango" if snap["vix_ok"] else "🔴 Backwardation"
+            st.metric("VIX/VXV Ratio",
+                      f"{snap['vix_ratio']:.3f}",
+                      f"{ratio_label} (<{snap['vix_threshold']:.2f}={'OK' if snap['vix_ok'] else 'WARN'})",
+                      delta_color="off")
+        else:
+            st.metric("VIX/VXV", "N/A")
+
+    # --- Overall verdict
+    with ms_col4:
+        if snap["spy_ok"] and snap["vix_ok"]:
+            verdict = "🟢 GO"
+            verdict_text = "Conditions favorable"
+        elif not snap["spy_ok"] and not snap["vix_ok"]:
+            verdict = "🔴 STOP"
+            verdict_text = "Trend down + high fear"
+        else:
+            verdict = "🟡 CAUTION"
+            verdict_text = "Mixed signals"
+        st.metric("Verdict", verdict, verdict_text, delta_color="off")
+
+    # Refresh button
+    with refresh_col2:
+        if st.button("🔄 Refresh", use_container_width=True,
+                     help="Force-refresh market data (clears 10-min cache)"):
+            _macro_snapshot_cached.clear()
+            st.rerun()
+
+st.markdown("---")
 
 
 # ==============================================================================
