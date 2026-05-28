@@ -35,7 +35,13 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import pandas_ta as ta
+
+# Try the original pandas-ta first; fall back to pandas-ta-classic
+# (a maintained fork that supports modern Python/NumPy versions).
+try:
+    import pandas_ta as ta
+except ImportError:
+    import pandas_ta_classic as ta
 
 warnings.filterwarnings("ignore")
 
@@ -330,8 +336,12 @@ def check_sector_strength(ticker: str, cfg: dict, data_cache: dict) -> tuple[boo
     if sector_etf == m["spy_ticker"]:
         return True, "no sector mapping -- skipped"
 
-    sec = data_cache.get(sector_etf) or fetch_ohlcv(sector_etf, period="6mo")
-    spy = data_cache.get(m["spy_ticker"]) or fetch_ohlcv(m["spy_ticker"], period="6mo")
+    sec = data_cache.get(sector_etf)
+    if sec is None:
+        sec = fetch_ohlcv(sector_etf, period="6mo")
+    spy = data_cache.get(m["spy_ticker"])
+    if spy is None:
+        spy = fetch_ohlcv(m["spy_ticker"], period="6mo")
     if sec is None or spy is None:
         return False, "sector/SPY unavailable"
 
@@ -356,6 +366,43 @@ def macro_kill_switch(cfg: dict) -> tuple[bool, dict]:
         "vix_term":       v_msg,
         "overall":        "PASS" if overall else "FAIL",
     }
+
+
+def get_macro_snapshot(cfg: dict) -> dict:
+    """
+    Return numeric macro values for UI display (not just pass/fail strings).
+    This is what the Streamlit app calls to show the "Market State" panel.
+    """
+    snap = {
+        "spy_price": None, "spy_sma": None, "spy_ok": None,
+        "vix": None, "vxv": None, "vix_ratio": None, "vix_ok": None,
+        "vix_threshold": cfg["macro"]["vix_ratio_threshold"],
+        "spy_sma_len":   cfg["macro"]["spy_sma_length"],
+    }
+    m = cfg["macro"]
+
+    spy = fetch_ohlcv(m["spy_ticker"], period="1y")
+    if spy is not None and not spy.empty:
+        spy["SMA"] = ta.sma(spy["Close"], length=m["spy_sma_length"])
+        last = spy.iloc[-1]
+        snap["spy_price"] = float(last["Close"])
+        snap["spy_sma"]   = float(last["SMA"]) if not pd.isna(last["SMA"]) else None
+        if snap["spy_sma"]:
+            snap["spy_ok"] = snap["spy_price"] > snap["spy_sma"]
+
+    vix = fetch_ohlcv(m["vix_ticker"], period="3mo")
+    vxv = fetch_ohlcv(m["vxv_ticker"], period="3mo")
+    if vix is not None and vxv is not None:
+        df = pd.concat([vix["Close"].rename("VIX"),
+                        vxv["Close"].rename("VXV")], axis=1).dropna()
+        if not df.empty:
+            snap["vix"] = float(df["VIX"].iloc[-1])
+            snap["vxv"] = float(df["VXV"].iloc[-1])
+            snap["vix_ratio"] = snap["vix"] / snap["vxv"]
+            snap["vix_ok"] = snap["vix_ratio"] < m["vix_ratio_threshold"]
+
+    snap["overall_ok"] = bool(snap.get("spy_ok") and snap.get("vix_ok"))
+    return snap
 
 
 # ==============================================================================
