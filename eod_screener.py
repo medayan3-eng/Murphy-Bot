@@ -33,7 +33,10 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import numpy as np
-import pandas as pd
+try:
+    import pandas_ta as ta
+except ImportError:
+    import pandas_ta_classic as ta
 import yfinance as yf
 import pandas_ta as ta
 
