@@ -35,13 +35,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 import yfinance as yf
-
-# Try the original pandas-ta first; fall back to pandas-ta-classic
-# (a maintained fork that supports modern Python/NumPy versions).
-try:
-    import pandas_ta as ta
-except ImportError:
-    import pandas_ta_classic as ta
+import pandas_ta as ta
 
 warnings.filterwarnings("ignore")
 
