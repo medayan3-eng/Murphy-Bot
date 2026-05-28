@@ -21,6 +21,8 @@ import pandas as pd
 import streamlit as st
 
 from eod_screener import (
+    STRATEGY_PROFILES,
+    apply_strategy_profile,
     get_default_config,
     get_macro_snapshot,
     load_portfolio,
@@ -262,6 +264,53 @@ with st.sidebar:
 
 
 # ==============================================================================
+# Main area -- Strategy Profile selector (Murphy's rule)
+# ==============================================================================
+st.subheader("🎯 Strategy Profile")
+st.caption(
+    "Murphy's iron rule (Ch. 10): match the indicator to the market environment. "
+    "Trend indicators (MAs) win in trends and lose in ranges; oscillators (RSI) "
+    "win in ranges and give false signals in trends. Pick the right profile for "
+    "what you're hunting today."
+)
+
+profile_keys   = list(STRATEGY_PROFILES.keys())
+profile_labels = [STRATEGY_PROFILES[k]["label"] for k in profile_keys]
+selected_label = st.selectbox(
+    "Choose a strategy", profile_labels, index=0,
+    help="Selecting a profile auto-overrides Module 2 filters. "
+         "Module 1 (macro) and Module 3 (risk) stay as configured."
+)
+selected_profile = profile_keys[profile_labels.index(selected_label)]
+
+# Show description
+desc = STRATEGY_PROFILES[selected_profile].get("description", "")
+if desc:
+    if selected_profile == "custom":
+        st.info(f"ℹ️ {desc}")
+    else:
+        st.success(f"✅ **Active profile:** {desc}")
+        with st.expander("See what this profile overrides"):
+            prof = STRATEGY_PROFILES[selected_profile]
+            if "screener" in prof:
+                st.markdown("**Screener (Module 2) overrides:**")
+                screener_df = pd.DataFrame(
+                    [(k, str(v)) for k, v in prof["screener"].items()],
+                    columns=["Setting", "Value"]
+                )
+                st.dataframe(screener_df, use_container_width=True, hide_index=True)
+            if "risk" in prof:
+                st.markdown("**Risk (Module 3) overrides:**")
+                risk_df = pd.DataFrame(
+                    [(k, str(v)) for k, v in prof["risk"].items()],
+                    columns=["Setting", "Value"]
+                )
+                st.dataframe(risk_df, use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+
+# ==============================================================================
 # Main area -- Market State panel (always visible)
 # ==============================================================================
 st.subheader("🌍 Market State")
@@ -429,6 +478,9 @@ def build_config() -> dict:
         "risk_per_trade_pct":     float(risk_per_trade),
         "trailing_sma_length":    int(trail_sma),
     })
+
+    # Apply strategy profile LAST so it overrides sidebar settings
+    cfg = apply_strategy_profile(cfg, selected_profile)
     return cfg
 
 
