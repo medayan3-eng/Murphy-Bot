@@ -140,12 +140,13 @@ with st.sidebar:
     st.subheader("Module 1 — Macro")
     macro_enabled     = st.checkbox("Enable macro kill-switch", value=True)
     spy_sma           = st.number_input("SPY trend SMA", 5, 400, 50)
-    vix_threshold     = st.slider("VIX/VXV ceiling", 0.5, 2.0, 1.0, 0.05)
     sector_check      = st.checkbox("Sector relative-strength check", value=True)
     sector_sma        = st.number_input("Sector ratio SMA", 3, 60, 10)
     ad_line_enabled   = st.checkbox("AD-line check (needs data source)", value=False,
                                     help="yfinance has no NYSE AD line. Plug your "
                                          "own source into fetch_ad_line().")
+    # VIX/VXV threshold is now displayed on the main screen, not configured here.
+    vix_threshold     = 1.0
 
     # ---- Screener module ----------------------------------------------------
     st.subheader("Module 2 — Screener")
@@ -165,6 +166,9 @@ with st.sidebar:
     keltner_ema       = st.slider("Keltner EMA length", 5, 60, 20)
     keltner_atr       = st.slider("Keltner ATR length", 5, 60, 20)
     keltner_mult      = st.slider("Keltner ATR multiplier", 1.0, 4.0, 2.0, 0.1)
+    keltner_lookback  = st.slider("Keltner breakout lookback (days)", 1, 20, 5,
+                                  help="Catch stocks that broke out within the last N days "
+                                       "(not only today). Higher = more candidates.")
     vol_mult          = st.slider("Volume surge multiplier", 1.0, 5.0, 1.5, 0.1)
     vol_sma           = st.slider("Volume SMA length", 5, 60, 20)
     whipsaw_pct       = st.slider("Whipsaw filter (%)", 0.0, 5.0, 1.0, 0.1) / 100
@@ -208,11 +212,16 @@ if snap:
     with ms_col1:
         if snap["spy_price"] and snap["spy_sma"]:
             delta_pct = (snap["spy_price"] / snap["spy_sma"] - 1) * 100
+            arrow = "🟢" if delta_pct > 0 else "🔴"
+            label = "above" if delta_pct > 0 else "below"
             st.metric(
-                f"SPY vs SMA{snap['spy_sma_len']}",
+                "SPY (S&P 500 ETF)",
                 f"${snap['spy_price']:.2f}",
-                f"{delta_pct:+.2f}% vs SMA",
-                delta_color="normal",
+                f"{arrow} {abs(delta_pct):.2f}% {label} SMA{snap['spy_sma_len']}",
+                delta_color="off",
+                help=f"SPY's current price. The SMA{snap['spy_sma_len']} "
+                     f"(50-day average) is ${snap['spy_sma']:.2f}. "
+                     f"Price above SMA = uptrend (good for new long signals)."
             )
         else:
             st.metric("SPY", "N/A")
@@ -323,6 +332,7 @@ def build_config() -> dict:
         "keltner_ema_length": int(keltner_ema),
         "keltner_atr_length": int(keltner_atr),
         "keltner_multiplier": float(keltner_mult),
+        "keltner_breakout_lookback": int(keltner_lookback),
         "volume_sma_length":  int(vol_sma),
         "volume_multiplier":  float(vol_mult),
         "whipsaw_pct":        float(whipsaw_pct),
@@ -400,15 +410,19 @@ if "last_result" in st.session_state:
     else:
         st.info(f"Macro kill-switch disabled.")
 
-    tab1, tab2, tab3 = st.tabs(
+    tab1, tab2, tab3, tab4 = st.tabs(
         [f"🆕 New Signals ({len(new_signals)})",
          f"📊 Portfolio ({len(portfolio_updates)})",
-         "🌍 Macro Detail"]
+         "🌍 Macro Detail",
+         "🔍 Diagnostics"]
     )
 
     with tab1:
         if new_signals.empty:
             st.info("No new buy signals.")
+            diag = result.get("diagnostics", {})
+            if diag:
+                st.markdown("**Why? Check the Diagnostics tab to see where the funnel narrowed.**")
         else:
             st.dataframe(new_signals, use_container_width=True, hide_index=True)
             tot_risk = new_signals["Risk_$"].sum()
@@ -429,6 +443,53 @@ if "last_result" in st.session_state:
         macro_df = pd.DataFrame(list(macro_info.items()),
                                 columns=["Check", "Result"])
         st.dataframe(macro_df, use_container_width=True, hide_index=True)
+
+    with tab4:
+        diag = result.get("diagnostics", {})
+        if not diag:
+            st.info("No diagnostics available (macro kill-switch blocked the scan).")
+        else:
+            st.markdown("### Funnel: how many tickers passed each filter")
+            st.caption("Each row shows how many tickers got past that filter. "
+                       "Look for the biggest drop — that's where most candidates are eliminated.")
+            funnel_rows = [
+                ("Evaluated (had data)",          diag["evaluated"]),
+                ("→ Sector strength OK",          diag["sector_rs_ok"]),
+                ("→ MA alignment",                diag["ma_alignment"]),
+                ("→ OBV breakout",                diag["obv_breakout"]),
+                ("→ Keltner breakout",            diag["keltner_breakout"]),
+                ("→ Volume surge",                diag["volume_surge"]),
+                ("→ Whipsaw filter",              diag["whipsaw_filter"]),
+                ("→ No bearish divergence",       diag["divergence_ok"]),
+                ("→ ALL filters passed together", diag["all_filters_ok"]),
+                ("→ Valid stop level",            diag["valid_stop"]),
+                ("→ R/R ratio met",               diag["rr_ok"]),
+                ("→ Final signals",               diag["final"]),
+            ]
+            diag_df = pd.DataFrame(funnel_rows, columns=["Step", "Count"])
+            st.dataframe(diag_df, use_container_width=True, hide_index=True)
+
+            if diag["final"] == 0 and diag["evaluated"] > 0:
+                # Find the biggest narrow point
+                st.markdown("### 💡 Suggestions to find more candidates")
+                tips = []
+                if diag["ma_alignment"] < diag["evaluated"] * 0.1:
+                    tips.append("- **MA alignment** is rejecting most stocks. "
+                                "Try removing the 200-SMA: change `MA lengths` to `20, 50, None`.")
+                if diag["keltner_breakout"] < diag["evaluated"] * 0.05:
+                    tips.append("- **Keltner breakout** is the bottleneck. "
+                                "Increase `Keltner breakout lookback` in the sidebar (try 10 or 15).")
+                if diag["volume_surge"] < diag["evaluated"] * 0.1:
+                    tips.append("- **Volume surge** is too strict. "
+                                "Lower `Volume surge multiplier` to 1.2 or 1.0.")
+                if diag["rr_ok"] < diag["all_filters_ok"] * 0.5 and diag["all_filters_ok"] > 0:
+                    tips.append("- **R/R ratio** is too high. "
+                                "Lower `Minimum R/R ratio` from 3.0 to 2.0.")
+                if not tips:
+                    tips.append("- The market may genuinely have no setups today. "
+                                "The strict filters are designed to flag only the best opportunities.")
+                for t in tips:
+                    st.markdown(t)
 
     # Downloads
     st.markdown("### 💾 Download")
