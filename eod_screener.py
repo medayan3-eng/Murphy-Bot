@@ -84,6 +84,7 @@ DEFAULT_CONFIG = {
         "keltner_ema_length":   20,
         "keltner_atr_length":   20,
         "keltner_multiplier":   2.0,
+        "keltner_breakout_lookback": 5,   # accept breakouts in the last N bars
 
         "volume_sma_length":    20,
         "volume_multiplier":    1.5,
@@ -428,12 +429,28 @@ def check_obv_breakout(df: pd.DataFrame, cfg: dict) -> bool:
 
 
 def check_keltner_breakout(df: pd.DataFrame, cfg: dict) -> bool:
-    if len(df) < 2:
+    """
+    Detect a recent Keltner upper-band breakout.
+    Default: the close must currently be above the upper band, AND a fresh
+    cross from below must have occurred within the last `breakout_lookback`
+    bars (default 5). This is looser than "must cross today" so the screener
+    catches stocks that broke out recently and are still above the band.
+    """
+    lb = cfg["screener"].get("keltner_breakout_lookback", 5)
+    if len(df) < lb + 2:
         return False
-    prev, curr = df.iloc[-2], df.iloc[-1]
-    if pd.isna(prev["KC_UPPER"]) or pd.isna(curr["KC_UPPER"]):
+    if pd.isna(df["KC_UPPER"].iloc[-1]) or df["Close"].iloc[-1] <= df["KC_UPPER"].iloc[-1]:
         return False
-    return bool(prev["Close"] <= prev["KC_UPPER"] and curr["Close"] > curr["KC_UPPER"])
+    # Find a cross from <= to > within the last lb bars
+    window = df.iloc[-lb - 1:]
+    for i in range(1, len(window)):
+        prev_c, prev_u = window["Close"].iloc[i - 1], window["KC_UPPER"].iloc[i - 1]
+        curr_c, curr_u = window["Close"].iloc[i],     window["KC_UPPER"].iloc[i]
+        if pd.isna(prev_u) or pd.isna(curr_u):
+            continue
+        if prev_c <= prev_u and curr_c > curr_u:
+            return True
+    return False
 
 
 def check_volume_surge(df: pd.DataFrame, cfg: dict) -> bool:
@@ -555,31 +572,61 @@ def check_volume_exit(df: pd.DataFrame, trailing_stop: float) -> bool:
 # ==============================================================================
 # ORCHESTRATION
 # ==============================================================================
-def evaluate_new_signals(cfg: dict, data_cache: dict) -> pd.DataFrame:
+def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dict]:
+    """Return (signals_df, diagnostics_dict).
+    Diagnostics count how many tickers passed each filter step - useful for
+    debugging "0 results" and showing the user where the funnel narrows.
+    """
     rows = []
+    diag = {
+        "evaluated": 0, "sector_rs_ok": 0,
+        "ma_alignment": 0, "obv_breakout": 0, "keltner_breakout": 0,
+        "volume_surge": 0, "whipsaw_filter": 0, "divergence_ok": 0,
+        "all_filters_ok": 0, "valid_stop": 0, "rr_ok": 0, "final": 0,
+    }
+
     for ticker in cfg["universe"]:
         df = data_cache.get(ticker)
         if df is None or len(df) < cfg["min_bars"]:
             continue
+        diag["evaluated"] += 1
+
         if cfg["macro"]["enabled"]:
             rs_ok, _ = check_sector_strength(ticker, cfg, data_cache)
             if not rs_ok:
                 continue
-        passed, _ = screen_stock(df, cfg)
-        if not passed:
+        diag["sector_rs_ok"] += 1
+
+        # Run each filter individually for diagnostics
+        checks = {
+            "ma_alignment":     check_ma_alignment(df, cfg),
+            "obv_breakout":     check_obv_breakout(df, cfg),
+            "keltner_breakout": check_keltner_breakout(df, cfg),
+            "volume_surge":     check_volume_surge(df, cfg),
+            "whipsaw_filter":   check_whipsaw_filter(df, cfg),
+            "divergence_ok":    check_divergence_blocker(df, cfg),
+        }
+        for k, v in checks.items():
+            if v:
+                diag[k] += 1
+        if not all(checks.values()):
             continue
+        diag["all_filters_ok"] += 1
 
         entry = float(df["Close"].iloc[-1])
         stop  = calculate_initial_stop(df, cfg)
         if stop >= entry:
             continue
+        diag["valid_stop"] += 1
         target = calculate_target(df, entry, cfg)
         rr_ok, rr = check_rr_ratio(entry, stop, target, cfg)
         if not rr_ok:
             continue
+        diag["rr_ok"] += 1
         shares = calculate_position_size(entry, stop, cfg)
         if shares <= 0:
             continue
+        diag["final"] += 1
 
         rows.append({
             "Ticker":        ticker,
@@ -590,7 +637,7 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> pd.DataFrame:
             "Shares_To_Buy": shares,
             "Risk_$":        round((entry - stop) * shares, 2),
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), diag
 
 
 def evaluate_portfolio(cfg: dict, data_cache: dict, portfolio: pd.DataFrame) -> pd.DataFrame:
@@ -669,8 +716,10 @@ def run_scanner(
 
     # 5) Module 2 (gated by macro)
     _p(0.85, "Screening universe...")
-    new_signals = (evaluate_new_signals(cfg, data_cache)
-                   if macro_ok else pd.DataFrame())
+    if macro_ok:
+        new_signals, diagnostics = evaluate_new_signals(cfg, data_cache)
+    else:
+        new_signals, diagnostics = pd.DataFrame(), {}
 
     # 6) Module 3 (always run; risk mgmt must work even when macro fails)
     _p(0.95, "Evaluating portfolio...")
@@ -680,6 +729,7 @@ def run_scanner(
     return {
         "new_signals":       new_signals,
         "portfolio_updates": portfolio_updates,
+        "diagnostics":       diagnostics,
         "macro":             macro_info,
         "macro_ok":          macro_ok,
         "data_cache":        data_cache,    # exposed for charting in the UI
