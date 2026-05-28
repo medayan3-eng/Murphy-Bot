@@ -119,9 +119,15 @@ with st.sidebar:
             col = "Ticker" if "Ticker" in df.columns else df.columns[0]
             custom_universe = df[col].astype(str).str.upper().str.strip().tolist()
 
+    # Adapt the slider's upper bound to the actual universe size
+    universe_size = max(len(custom_universe), 10)
+    default_max = min(200, universe_size)
     max_tickers = st.slider(
-        "Max tickers to scan", min_value=10, max_value=2500, value=200, step=10,
-        help="Caps the universe to control runtime. 200 tickers ≈ 1–2 min.",
+        "Max tickers to scan",
+        min_value=10, max_value=universe_size,
+        value=default_max, step=10,
+        help=f"You have {universe_size} tickers available. "
+             f"Cap this to control runtime. ~200 tickers ≈ 1–2 min.",
     )
     if len(custom_universe) > max_tickers:
         custom_universe = custom_universe[:max_tickers]
@@ -138,43 +144,107 @@ with st.sidebar:
 
     # ---- Macro module -------------------------------------------------------
     st.subheader("Module 1 — Macro")
-    macro_enabled     = st.checkbox("Enable macro kill-switch", value=True)
-    spy_sma           = st.number_input("SPY trend SMA", 5, 400, 50)
-    sector_check      = st.checkbox("Sector relative-strength check", value=True)
-    sector_sma        = st.number_input("Sector ratio SMA", 3, 60, 10)
-    ad_line_enabled   = st.checkbox("AD-line check (needs data source)", value=False,
-                                    help="yfinance has no NYSE AD line. Plug your "
-                                         "own source into fetch_ad_line().")
-    # VIX/VXV threshold is now displayed on the main screen, not configured here.
-    vix_threshold     = 1.0
+    st.caption("Each check has an ON/OFF toggle. Disabled checks are skipped (treated as PASS).")
+
+    macro_enabled = st.checkbox("Enable macro kill-switch (master)", value=True,
+                                help="If OFF, all macro checks are bypassed and "
+                                     "new signals are always allowed.")
+
+    # SPY trend check
+    spy_trend_on = st.checkbox("✅ SPY trend check", value=True,
+                               help="SPY price must be above its SMA")
+    if spy_trend_on:
+        spy_sma = st.slider("  SPY trend SMA length", 5, 400, 50, key="spy_sma",
+                            help="SPY must close above this moving average")
+    else:
+        spy_sma = 50  # placeholder, ignored
+
+    # Sector relative-strength check
+    sector_check = st.checkbox("✅ Sector relative-strength check", value=True,
+                               help="Stock's sector ETF must be outperforming SPY")
+    if sector_check:
+        sector_sma = st.slider("  Sector ratio SMA length", 3, 60, 10, key="sector_sma",
+                               help="SMA length on sector/SPY ratio")
+    else:
+        sector_sma = 10
+
+    # AD-line check
+    ad_line_enabled = st.checkbox("⬜ AD-line check", value=False,
+                                  help="Needs an external data source. "
+                                       "yfinance does not provide this.")
+
+    vix_threshold = 1.0  # Fixed; displayed on main screen
+
 
     # ---- Screener module ----------------------------------------------------
     st.subheader("Module 2 — Screener")
-    ma_type   = st.selectbox("MA type", ["sma", "ema"], index=0)
-    ma_input  = st.text_input("MA lengths (comma-sep, use 'None' to skip)",
-                              value="20, 50, 200")
-    ma_lengths = []
-    for tok in ma_input.split(","):
-        tok = tok.strip()
-        if tok.lower() in ("none", ""):
-            ma_lengths.append(None)
-        else:
-            try: ma_lengths.append(int(tok))
-            except ValueError: pass
+    st.caption("Each filter has an ON/OFF toggle. Turn off filters to find more candidates.")
 
-    obv_lookback      = st.slider("OBV lookback (days)", 5, 60, 20)
-    keltner_ema       = st.slider("Keltner EMA length", 5, 60, 20)
-    keltner_atr       = st.slider("Keltner ATR length", 5, 60, 20)
-    keltner_mult      = st.slider("Keltner ATR multiplier", 1.0, 4.0, 2.0, 0.1)
-    keltner_lookback  = st.slider("Keltner breakout lookback (days)", 1, 20, 5,
-                                  help="Catch stocks that broke out within the last N days "
-                                       "(not only today). Higher = more candidates.")
-    vol_mult          = st.slider("Volume surge multiplier", 1.0, 5.0, 1.5, 0.1)
-    vol_sma           = st.slider("Volume SMA length", 5, 60, 20)
-    whipsaw_pct       = st.slider("Whipsaw filter (%)", 0.0, 5.0, 1.0, 0.1) / 100
-    divergence_on     = st.checkbox("Bearish-RSI-divergence blocker", value=True)
-    rsi_len           = st.slider("RSI length", 5, 30, 14)
-    div_lookback      = st.slider("Divergence lookback", 10, 60, 20)
+    # MA alignment
+    ma_align_on = st.checkbox("✅ Moving-average alignment", value=True,
+                              help="Close > MA1 > MA2 > MA3 (trend filter)")
+    if ma_align_on:
+        ma_type  = st.selectbox("  MA type", ["sma", "ema"], index=0, key="ma_type")
+        ma_input = st.text_input("  MA lengths (comma-sep, 'None' to skip a slot)",
+                                 value="20, 50, 200", key="ma_input")
+        ma_lengths = []
+        for tok in ma_input.split(","):
+            tok = tok.strip()
+            if tok.lower() in ("none", ""):
+                ma_lengths.append(None)
+            else:
+                try: ma_lengths.append(int(tok))
+                except ValueError: pass
+    else:
+        ma_type, ma_lengths = "sma", []  # empty list = filter disabled
+
+    # OBV breakout
+    obv_on = st.checkbox("✅ OBV breakout", value=True,
+                        help="On-Balance Volume must be at a new local high")
+    if obv_on:
+        obv_lookback = st.slider("  OBV lookback (days)", 5, 60, 20, key="obv_lb")
+    else:
+        obv_lookback = 20
+
+    # Keltner breakout
+    keltner_on = st.checkbox("✅ Keltner channel breakout", value=True,
+                            help="Price crossed above the upper Keltner band")
+    if keltner_on:
+        keltner_ema      = st.slider("  Keltner EMA length", 5, 60, 20, key="kc_ema")
+        keltner_atr      = st.slider("  Keltner ATR length", 5, 60, 20, key="kc_atr")
+        keltner_mult     = st.slider("  Keltner ATR multiplier", 1.0, 4.0, 2.0, 0.1, key="kc_mult")
+        keltner_lookback = st.slider("  Breakout lookback (days)", 1, 20, 5, key="kc_lb",
+                                     help="Higher = catches stocks that broke out recently, "
+                                          "not just today.")
+    else:
+        keltner_ema, keltner_atr, keltner_mult, keltner_lookback = 20, 20, 2.0, 5
+
+    # Volume surge
+    vol_on = st.checkbox("✅ Volume surge", value=True,
+                        help="Today's volume must exceed N× the average")
+    if vol_on:
+        vol_mult = st.slider("  Volume surge multiplier", 1.0, 5.0, 1.5, 0.1, key="vol_mult")
+        vol_sma  = st.slider("  Volume SMA length", 5, 60, 20, key="vol_sma")
+    else:
+        vol_mult, vol_sma = 0.0, 20  # 0.0 = always passes
+
+    # Whipsaw filter
+    whipsaw_on = st.checkbox("✅ Whipsaw filter", value=True,
+                            help="Price must be N% above the breakout level (avoid fakes)")
+    if whipsaw_on:
+        whipsaw_pct = st.slider("  Whipsaw filter (%)", 0.0, 5.0, 1.0, 0.1, key="wp") / 100
+    else:
+        whipsaw_pct = -1.0  # any close above the band passes
+
+    # Bearish RSI divergence blocker
+    divergence_on = st.checkbox("✅ Bearish-RSI-divergence blocker", value=True,
+                                help="Reject if price is at a new high but RSI is lower")
+    if divergence_on:
+        rsi_len      = st.slider("  RSI length", 5, 30, 14, key="rsi_len")
+        div_lookback = st.slider("  Divergence lookback", 10, 60, 20, key="div_lb")
+    else:
+        rsi_len, div_lookback = 14, 20
+
 
     # ---- Risk module --------------------------------------------------------
     st.subheader("Module 3 — Risk")
@@ -318,14 +388,22 @@ def build_config() -> dict:
     cfg["history_period"]  = history_period
 
     cfg["macro"].update({
-        "enabled":             macro_enabled,
-        "spy_sma_length":      int(spy_sma),
-        "vix_ratio_threshold": float(vix_threshold),
+        "enabled":              macro_enabled,
+        "spy_trend_enabled":    spy_trend_on,
+        "spy_sma_length":       int(spy_sma),
+        "vix_ratio_threshold":  float(vix_threshold),
         "sector_check_enabled": sector_check,
-        "sector_sma_length":   int(sector_sma),
-        "ad_line_enabled":     ad_line_enabled,
+        "sector_sma_length":    int(sector_sma),
+        "ad_line_enabled":      ad_line_enabled,
     })
     cfg["screener"].update({
+        # Filter on/off toggles
+        "ma_alignment_enabled":      ma_align_on,
+        "obv_enabled":               obv_on,
+        "keltner_enabled":           keltner_on,
+        "volume_surge_enabled":      vol_on,
+        "whipsaw_enabled":           whipsaw_on,
+        # Filter parameters
         "ma_lengths":         ma_lengths,
         "ma_type":            ma_type,
         "obv_lookback":       int(obv_lookback),
