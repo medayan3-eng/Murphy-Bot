@@ -292,6 +292,8 @@ def add_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 # ==============================================================================
 def check_market_trend(cfg: dict) -> tuple[bool, str]:
     m = cfg["macro"]
+    if not m.get("spy_trend_enabled", True):
+        return True, "SPY trend check disabled"
     spy = fetch_ohlcv(m["spy_ticker"], period="1y")
     if spy is None:
         return False, "SPY data unavailable"
@@ -410,6 +412,8 @@ def get_macro_snapshot(cfg: dict) -> dict:
 # MODULE 2 -- SCREENER
 # ==============================================================================
 def check_ma_alignment(df: pd.DataFrame, cfg: dict) -> bool:
+    if not cfg["screener"].get("ma_alignment_enabled", True):
+        return True
     lengths = [L for L in cfg["screener"]["ma_lengths"] if L is not None]
     if not lengths:
         return True
@@ -421,6 +425,8 @@ def check_ma_alignment(df: pd.DataFrame, cfg: dict) -> bool:
 
 
 def check_obv_breakout(df: pd.DataFrame, cfg: dict) -> bool:
+    if not cfg["screener"].get("obv_enabled", True):
+        return True
     lb = cfg["screener"]["obv_lookback"]
     if len(df) < lb + 1:
         return False
@@ -436,6 +442,8 @@ def check_keltner_breakout(df: pd.DataFrame, cfg: dict) -> bool:
     bars (default 5). This is looser than "must cross today" so the screener
     catches stocks that broke out recently and are still above the band.
     """
+    if not cfg["screener"].get("keltner_enabled", True):
+        return True
     lb = cfg["screener"].get("keltner_breakout_lookback", 5)
     if len(df) < lb + 2:
         return False
@@ -454,6 +462,8 @@ def check_keltner_breakout(df: pd.DataFrame, cfg: dict) -> bool:
 
 
 def check_volume_surge(df: pd.DataFrame, cfg: dict) -> bool:
+    if not cfg["screener"].get("volume_surge_enabled", True):
+        return True
     row = df.iloc[-1]
     if pd.isna(row["VOL_SMA"]) or row["VOL_SMA"] == 0:
         return False
@@ -461,6 +471,8 @@ def check_volume_surge(df: pd.DataFrame, cfg: dict) -> bool:
 
 
 def check_whipsaw_filter(df: pd.DataFrame, cfg: dict) -> bool:
+    if not cfg["screener"].get("whipsaw_enabled", True):
+        return True
     row = df.iloc[-1]
     if pd.isna(row["KC_UPPER"]):
         return False
