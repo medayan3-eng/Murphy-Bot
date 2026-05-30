@@ -94,6 +94,11 @@ DEFAULT_CONFIG = {
         "divergence_enabled":   True,
         "divergence_lookback":  20,
         "rsi_length":           14,
+
+        # Beta filter (volatility vs SPY)
+        "beta_filter_enabled":  True,
+        "beta_min":             1.5,
+        "beta_lookback":        252,    # ~1 year of trading days
     },
 
     # ----- Module 3: Risk Management ----------------------------------------
@@ -814,21 +819,103 @@ def check_volume_exit(df: pd.DataFrame, trailing_stop: float) -> bool:
 
 
 # ==============================================================================
+# BETA  --  volatility relative to SPY
+# ==============================================================================
+def compute_beta(stock_df: pd.DataFrame,
+                 spy_df: Optional[pd.DataFrame],
+                 lookback: int = 252) -> Optional[float]:
+    """
+    Compute stock beta vs SPY using daily returns over `lookback` bars.
+    beta = Cov(stock_ret, spy_ret) / Var(spy_ret).
+    Returns None if either series is too short or variance is zero.
+    """
+    if stock_df is None or spy_df is None or stock_df.empty or spy_df.empty:
+        return None
+    common_idx = stock_df.index.intersection(spy_df.index)
+    if len(common_idx) < 30:
+        return None
+    stock = stock_df.loc[common_idx, "Close"].iloc[-lookback:]
+    spy   = spy_df.loc[common_idx,   "Close"].iloc[-lookback:]
+    if len(stock) < 30:
+        return None
+    stock_ret = stock.pct_change().dropna()
+    spy_ret   = spy.pct_change().dropna()
+    common = stock_ret.index.intersection(spy_ret.index)
+    if len(common) < 30:
+        return None
+    stock_ret = stock_ret.loc[common]
+    spy_ret   = spy_ret.loc[common]
+    spy_var = spy_ret.var()
+    if spy_var == 0 or pd.isna(spy_var):
+        return None
+    cov = stock_ret.cov(spy_ret)
+    if pd.isna(cov):
+        return None
+    return float(cov / spy_var)
+
+
+def check_beta_filter(df: pd.DataFrame,
+                      cfg: dict,
+                      spy_df: Optional[pd.DataFrame]) -> tuple[bool, Optional[float]]:
+    """Returns (passes, computed_beta). Filter disabled => always passes."""
+    sc = cfg["screener"]
+    beta = compute_beta(df, spy_df, lookback=sc.get("beta_lookback", 252))
+    if not sc.get("beta_filter_enabled", False):
+        return True, beta
+    if beta is None:
+        return False, None
+    return beta >= sc.get("beta_min", 1.5), beta
+
+
+# ==============================================================================
 # ORCHESTRATION
 # ==============================================================================
-def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dict]:
-    """Return (signals_df, diagnostics_dict).
-    Diagnostics count how many tickers passed each filter step - useful for
-    debugging "0 results" and showing the user where the funnel narrows.
+def evaluate_new_signals(cfg: dict, data_cache: dict) -> dict:
     """
-    rows = []
+    Returns a dict:
+        "signals":      DataFrame of full passes (ready to trade)
+        "near_misses":  DataFrame of top-10 closest non-passers, with score
+        "diagnostics":  funnel counts (how many passed each step)
+        "all_candidates": every evaluated ticker (for advanced debugging)
+    """
+    spy_df = data_cache.get(cfg["macro"]["spy_ticker"])
+
+    signals = []
+    candidates = []   # ALL evaluated tickers with their score
+
     diag = {
-        "evaluated": 0, "sector_rs_ok": 0,
+        "evaluated": 0, "sector_rs_ok": 0, "beta_ok": 0,
         "ma_alignment": 0, "obv_breakout": 0, "keltner_breakout": 0,
         "volume_surge": 0, "whipsaw_filter": 0, "divergence_ok": 0,
         "pullback_trigger": 0, "reversal_trigger": 0,
         "all_filters_ok": 0, "valid_stop": 0, "rr_ok": 0, "final": 0,
     }
+
+    # Friendly Hebrew/English filter names for display
+    filter_labels = {
+        "ma_alignment":     "MA alignment",
+        "obv_breakout":     "OBV breakout",
+        "keltner_breakout": "Keltner breakout",
+        "volume_surge":     "Volume surge",
+        "whipsaw_filter":   "Whipsaw filter",
+        "divergence_ok":    "No RSI divergence",
+        "pullback_trigger": "Pullback trigger",
+        "reversal_trigger": "Reversal trigger",
+    }
+
+    sc = cfg["screener"]
+    # Which filters are currently enabled (used for scoring)
+    enabled_map = {
+        "ma_alignment":     sc.get("ma_alignment_enabled", True),
+        "obv_breakout":     sc.get("obv_enabled", True),
+        "keltner_breakout": sc.get("keltner_enabled", True),
+        "volume_surge":     sc.get("volume_surge_enabled", True),
+        "whipsaw_filter":   sc.get("whipsaw_enabled", True),
+        "divergence_ok":    sc.get("divergence_enabled", True),
+        "pullback_trigger": sc.get("pullback_enabled", False),
+        "reversal_trigger": sc.get("reversal_enabled", False),
+    }
+    enabled_filters = [k for k, v in enabled_map.items() if v]
 
     for ticker in cfg["universe"]:
         df = data_cache.get(ticker)
@@ -836,13 +923,21 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dic
             continue
         diag["evaluated"] += 1
 
+        # Beta filter (and beta computation for display, always run)
+        beta_ok, beta_val = check_beta_filter(df, cfg, spy_df)
+        if not beta_ok:
+            continue
+        diag["beta_ok"] += 1
+
+        # Sector strength
+        sector_ok = True
         if cfg["macro"]["enabled"]:
-            rs_ok, _ = check_sector_strength(ticker, cfg, data_cache)
-            if not rs_ok:
+            sector_ok, _ = check_sector_strength(ticker, cfg, data_cache)
+            if not sector_ok:
                 continue
         diag["sector_rs_ok"] += 1
 
-        # Run each filter individually for diagnostics
+        # Run each filter
         checks = {
             "ma_alignment":     check_ma_alignment(df, cfg),
             "obv_breakout":     check_obv_breakout(df, cfg),
@@ -856,12 +951,37 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dic
         for k, v in checks.items():
             if v:
                 diag[k] += 1
-        if not all(checks.values()):
+
+        # Score: % of ENABLED filters that this ticker passed
+        if enabled_filters:
+            passed_enabled = sum(1 for k in enabled_filters if checks.get(k, False))
+            score = round(passed_enabled / len(enabled_filters) * 100, 1)
+        else:
+            score = 100.0
+
+        passed_labels = [filter_labels[k] for k in enabled_filters if checks.get(k, False)]
+        failed_labels = [filter_labels[k] for k in enabled_filters if not checks.get(k, False)]
+
+        entry = float(df["Close"].iloc[-1])
+
+        candidate = {
+            "Ticker":     ticker,
+            "Score":      score,
+            "Price":      round(entry, 2),
+            "Beta":       round(beta_val, 2) if beta_val is not None else None,
+            "Passed":     ", ".join(passed_labels) if passed_labels else "—",
+            "Failed":     ", ".join(failed_labels) if failed_labels else "—",
+        }
+        candidates.append(candidate)
+
+        # Did ALL enabled filters pass?
+        all_ok = all(checks.get(k, True) for k in enabled_filters)
+        if not all_ok:
             continue
         diag["all_filters_ok"] += 1
 
-        entry = float(df["Close"].iloc[-1])
-        stop  = calculate_initial_stop(df, cfg)
+        # Risk gating
+        stop = calculate_initial_stop(df, cfg)
         if stop >= entry:
             continue
         diag["valid_stop"] += 1
@@ -875,16 +995,32 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> tuple[pd.DataFrame, dic
             continue
         diag["final"] += 1
 
-        rows.append({
+        signals.append({
             "Ticker":        ticker,
+            "Score":         score,
             "Entry_Price":   round(entry, 2),
             "Initial_Stop":  round(stop, 2),
             "Target":        round(target, 2),
             "R_R_Ratio":     round(rr, 2),
             "Shares_To_Buy": shares,
             "Risk_$":        round((entry - stop) * shares, 2),
+            "Beta":          round(beta_val, 2) if beta_val is not None else None,
         })
-    return pd.DataFrame(rows), diag
+
+    # Near-misses: top 10 candidates that did NOT make it to signals,
+    # sorted by score descending (highest score first), then price.
+    signal_tickers = {s["Ticker"] for s in signals}
+    near_misses = sorted(
+        [c for c in candidates if c["Ticker"] not in signal_tickers],
+        key=lambda x: (-x["Score"], x["Ticker"]),
+    )[:10]
+
+    return {
+        "signals":        pd.DataFrame(signals),
+        "near_misses":    pd.DataFrame(near_misses),
+        "diagnostics":    diag,
+        "all_candidates": pd.DataFrame(candidates),
+    }
 
 
 def evaluate_portfolio(cfg: dict, data_cache: dict, portfolio: pd.DataFrame) -> pd.DataFrame:
@@ -945,28 +1081,43 @@ def run_scanner(
                          sector_etfs)
 
     # 3) Batched OHLCV download
+    import time
+    t0 = time.time()
     _p(0.10, f"Fetching OHLCV for {len(all_tickers)} symbols...")
     raw_cache = fetch_ohlcv_batch(
         all_tickers, period=cfg["history_period"], status_cb=status_cb,
     )
-    _s(f"Fetched {len(raw_cache)}/{len(all_tickers)} symbols")
+    t_download = time.time() - t0
+    _s(f"Fetched {len(raw_cache)}/{len(all_tickers)} symbols in {t_download:.1f}s")
 
     # 4) Enrich with indicators
+    t1 = time.time()
     _p(0.70, "Computing indicators...")
     data_cache = {}
+    skipped_short = 0
     for t, df in raw_cache.items():
-        if len(df) >= 50:
-            try:
-                data_cache[t] = add_indicators(df, cfg)
-            except Exception:
-                continue
+        if len(df) < 50:
+            skipped_short += 1
+            continue
+        try:
+            data_cache[t] = add_indicators(df, cfg)
+        except Exception:
+            continue
+    t_indicators = time.time() - t1
 
     # 5) Module 2 (gated by macro)
+    t2 = time.time()
     _p(0.85, "Screening universe...")
     if macro_ok:
-        new_signals, diagnostics = evaluate_new_signals(cfg, data_cache)
+        scan_result = evaluate_new_signals(cfg, data_cache)
+        new_signals  = scan_result["signals"]
+        near_misses  = scan_result["near_misses"]
+        diagnostics  = scan_result["diagnostics"]
     else:
-        new_signals, diagnostics = pd.DataFrame(), {}
+        new_signals  = pd.DataFrame()
+        near_misses  = pd.DataFrame()
+        diagnostics  = {}
+    t_screen = time.time() - t2
 
     # 6) Module 3 (always run; risk mgmt must work even when macro fails)
     _p(0.95, "Evaluating portfolio...")
@@ -975,10 +1126,20 @@ def run_scanner(
     _p(1.0, "Done.")
     return {
         "new_signals":       new_signals,
+        "near_misses":       near_misses,
         "portfolio_updates": portfolio_updates,
         "diagnostics":       diagnostics,
         "macro":             macro_info,
         "macro_ok":          macro_ok,
-        "data_cache":        data_cache,    # exposed for charting in the UI
+        "data_cache":        data_cache,
         "timestamp":         datetime.now(),
+        "stats": {
+            "requested":      len(all_tickers),
+            "downloaded":     len(raw_cache),
+            "indicators_ok":  len(data_cache),
+            "skipped_short":  skipped_short,
+            "t_download_s":   round(t_download, 1),
+            "t_indicators_s": round(t_indicators, 1),
+            "t_screen_s":     round(t_screen, 1),
+        },
     }
