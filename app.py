@@ -123,19 +123,25 @@ with st.sidebar:
             col = "Ticker" if "Ticker" in df.columns else df.columns[0]
             custom_universe = df[col].astype(str).str.upper().str.strip().tolist()
 
-    # Adapt the slider's upper bound to the actual universe size
+    # Adapt the slider's upper bound to the actual universe size.
+    # Use a key tied to the universe choice so the slider resets when the
+    # universe changes (otherwise Streamlit keeps the old value, which can
+    # be smaller than the new universe and looks like a bug).
     universe_size = max(len(custom_universe), 10)
-    default_max = min(200, universe_size)
+    default_max = universe_size   # scan ALL by default
+    slider_key = f"max_tickers_{universe_choice}_{universe_size}"
     max_tickers = st.slider(
         "Max tickers to scan",
         min_value=10, max_value=universe_size,
         value=default_max, step=10,
+        key=slider_key,
         help=f"You have {universe_size} tickers available. "
-             f"Cap this to control runtime. ~200 tickers ≈ 1–2 min.",
+             f"Default is to scan all. Cap lower to test faster. "
+             f"~200 tickers ≈ 1–2 min, ~500 ≈ 3–5 min.",
     )
     if len(custom_universe) > max_tickers:
         custom_universe = custom_universe[:max_tickers]
-    st.caption(f"**{len(custom_universe)}** tickers selected")
+    st.caption(f"**{len(custom_universe)}** of {universe_size} tickers selected")
 
     # ---- Equity & risk ------------------------------------------------------
     st.subheader("Account")
