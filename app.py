@@ -93,17 +93,19 @@ with st.sidebar:
     st.subheader("Universe")
     universe_choice = st.radio(
         "Source",
-        ["S&P 500 (502)", "Russell 2000 (1,909)", "Both (2,411)",
-         "Custom tickers", "Upload CSV"],
+        ["🔥 High-Momentum (140)", "S&P 500 (502)", "Russell 2000 (1,909)",
+         "Both S&P + R2K (2,411)", "Custom tickers", "Upload CSV"],
         index=0,
     )
 
     custom_universe: list[str] = []
-    if universe_choice == "S&P 500 (502)":
+    if universe_choice == "🔥 High-Momentum (140)":
+        custom_universe = _load_universe_cached(f"{UNIVERSE_DIR}/high_momentum.csv")
+    elif universe_choice == "S&P 500 (502)":
         custom_universe = _load_universe_cached(f"{UNIVERSE_DIR}/sp500.csv")
     elif universe_choice == "Russell 2000 (1,909)":
         custom_universe = _load_universe_cached(f"{UNIVERSE_DIR}/russell2000.csv")
-    elif universe_choice == "Both (2,411)":
+    elif universe_choice == "Both S&P + R2K (2,411)":
         sp = _load_universe_cached(f"{UNIVERSE_DIR}/sp500.csv")
         r2 = _load_universe_cached(f"{UNIVERSE_DIR}/russell2000.csv")
         custom_universe = sorted(set(sp) | set(r2))
@@ -246,6 +248,19 @@ with st.sidebar:
         div_lookback = st.slider("  Divergence lookback", 10, 60, 20, key="div_lb")
     else:
         rsi_len, div_lookback = 14, 20
+
+    # Beta filter (volatility vs SPY)
+    beta_on = st.checkbox("✅ Beta filter (vs SPY)", value=True,
+                          help="Only keep stocks with beta above the threshold. "
+                               "High beta = high volatility = bigger moves.")
+    if beta_on:
+        beta_min = st.slider("  Minimum beta", 0.5, 3.0, 1.5, 0.1, key="beta_min",
+                            help="1.0 = moves with market. 1.5 = 50% more volatile. "
+                                 "2.0+ = aggressive, high-volatility names.")
+        beta_lb = st.slider("  Beta lookback (days)", 60, 504, 252, 21, key="beta_lb",
+                           help="How much history to use. 252 = 1 year.")
+    else:
+        beta_min, beta_lb = 1.5, 252
 
 
     # ---- Risk module --------------------------------------------------------
@@ -466,6 +481,10 @@ def build_config() -> dict:
         "divergence_enabled": divergence_on,
         "divergence_lookback": int(div_lookback),
         "rsi_length":         int(rsi_len),
+        # Beta filter
+        "beta_filter_enabled": beta_on,
+        "beta_min":            float(beta_min),
+        "beta_lookback":       int(beta_lb),
     })
     cfg["risk"].update({
         "atr_length":             int(atr_len),
@@ -540,8 +559,20 @@ if "last_result" in st.session_state:
     else:
         st.info(f"Macro kill-switch disabled.")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
+    # Scan stats banner
+    stats = result.get("stats", {})
+    if stats:
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Tickers requested",  f"{stats.get('requested', 0):,}")
+        s2.metric("Successfully downloaded", f"{stats.get('downloaded', 0):,}")
+        s3.metric("Have full indicators", f"{stats.get('indicators_ok', 0):,}")
+        s4.metric("Total scan time", f"{stats.get('t_download_s', 0) + stats.get('t_indicators_s', 0) + stats.get('t_screen_s', 0):.1f}s")
+
+    near_misses = result.get("near_misses", pd.DataFrame())
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [f"🆕 New Signals ({len(new_signals)})",
+         f"🎯 Top Near-Misses ({len(near_misses)})",
          f"📊 Portfolio ({len(portfolio_updates)})",
          "🌍 Macro Detail",
          "🔍 Diagnostics"]
@@ -549,16 +580,38 @@ if "last_result" in st.session_state:
 
     with tab1:
         if new_signals.empty:
-            st.info("No new buy signals.")
+            st.info("No stocks passed ALL filters today.")
             diag = result.get("diagnostics", {})
             if diag:
-                st.markdown("**Why? Check the Diagnostics tab to see where the funnel narrowed.**")
+                st.markdown("👉 **Check the 'Top Near-Misses' tab** — these are the closest "
+                            "candidates that missed only 1-2 filters. They might be worth "
+                            "watching tomorrow.")
         else:
             st.dataframe(new_signals, use_container_width=True, hide_index=True)
             tot_risk = new_signals["Risk_$"].sum()
             st.metric("Total $ at risk across new signals", f"${tot_risk:,.2f}")
 
     with tab2:
+        if near_misses.empty:
+            st.info("No candidates to evaluate (possibly because no tickers had "
+                   "valid data, or all of them passed and are in New Signals).")
+        else:
+            st.caption("Top 10 stocks ranked by % of filters passed. "
+                       "Use this to find stocks that are CLOSE to triggering — they may set up over the next few days.")
+            # Color scoring
+            def _score_color(v):
+                if v >= 80:   return "background-color:#1f5a1f"  # green
+                if v >= 60:   return "background-color:#5a5a1f"  # yellow
+                return "background-color:#5a1f1f"                # red
+            def _style_row(row):
+                return [_score_color(row["Score"])] * len(row)
+            st.dataframe(near_misses.style.apply(_style_row, axis=1),
+                         use_container_width=True, hide_index=True)
+            st.caption("**Score** = % of enabled filters passed. "
+                       "**Passed** = which filters this stock satisfies. "
+                       "**Failed** = which filters this stock is missing.")
+
+    with tab3:
         if portfolio_updates.empty:
             st.info("No portfolio positions to evaluate.")
         else:
@@ -569,12 +622,12 @@ if "last_result" in st.session_state:
             st.dataframe(portfolio_updates.style.apply(_row_style, axis=1),
                          use_container_width=True, hide_index=True)
 
-    with tab3:
+    with tab4:
         macro_df = pd.DataFrame(list(macro_info.items()),
                                 columns=["Check", "Result"])
         st.dataframe(macro_df, use_container_width=True, hide_index=True)
 
-    with tab4:
+    with tab5:
         diag = result.get("diagnostics", {})
         if not diag:
             st.info("No diagnostics available (macro kill-switch blocked the scan).")
@@ -583,18 +636,21 @@ if "last_result" in st.session_state:
             st.caption("Each row shows how many tickers got past that filter. "
                        "Look for the biggest drop — that's where most candidates are eliminated.")
             funnel_rows = [
-                ("Evaluated (had data)",          diag["evaluated"]),
-                ("→ Sector strength OK",          diag["sector_rs_ok"]),
-                ("→ MA alignment",                diag["ma_alignment"]),
-                ("→ OBV breakout",                diag["obv_breakout"]),
-                ("→ Keltner breakout",            diag["keltner_breakout"]),
-                ("→ Volume surge",                diag["volume_surge"]),
-                ("→ Whipsaw filter",              diag["whipsaw_filter"]),
-                ("→ No bearish divergence",       diag["divergence_ok"]),
-                ("→ ALL filters passed together", diag["all_filters_ok"]),
-                ("→ Valid stop level",            diag["valid_stop"]),
-                ("→ R/R ratio met",               diag["rr_ok"]),
-                ("→ Final signals",               diag["final"]),
+                ("Evaluated (had data)",          diag.get("evaluated", 0)),
+                ("→ Beta filter passed",          diag.get("beta_ok", 0)),
+                ("→ Sector strength OK",          diag.get("sector_rs_ok", 0)),
+                ("→ MA alignment",                diag.get("ma_alignment", 0)),
+                ("→ OBV breakout",                diag.get("obv_breakout", 0)),
+                ("→ Keltner breakout",            diag.get("keltner_breakout", 0)),
+                ("→ Volume surge",                diag.get("volume_surge", 0)),
+                ("→ Whipsaw filter",              diag.get("whipsaw_filter", 0)),
+                ("→ No bearish divergence",       diag.get("divergence_ok", 0)),
+                ("→ Pullback trigger",            diag.get("pullback_trigger", 0)),
+                ("→ Reversal trigger",            diag.get("reversal_trigger", 0)),
+                ("→ ALL filters passed together", diag.get("all_filters_ok", 0)),
+                ("→ Valid stop level",            diag.get("valid_stop", 0)),
+                ("→ R/R ratio met",               diag.get("rr_ok", 0)),
+                ("→ Final signals",               diag.get("final", 0)),
             ]
             diag_df = pd.DataFrame(funnel_rows, columns=["Step", "Count"])
             st.dataframe(diag_df, use_container_width=True, hide_index=True)
