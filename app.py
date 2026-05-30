@@ -93,13 +93,13 @@ with st.sidebar:
     st.subheader("Universe")
     universe_choice = st.radio(
         "Source",
-        ["🔥 High-Momentum (140)", "S&P 500 (502)", "Russell 2000 (1,909)",
+        ["🔥 High-Momentum (531)", "S&P 500 (502)", "Russell 2000 (1,909)",
          "Both S&P + R2K (2,411)", "Custom tickers", "Upload CSV"],
         index=0,
     )
 
     custom_universe: list[str] = []
-    if universe_choice == "🔥 High-Momentum (140)":
+    if universe_choice == "🔥 High-Momentum (531)":
         custom_universe = _load_universe_cached(f"{UNIVERSE_DIR}/high_momentum.csv")
     elif universe_choice == "S&P 500 (502)":
         custom_universe = _load_universe_cached(f"{UNIVERSE_DIR}/sp500.csv")
