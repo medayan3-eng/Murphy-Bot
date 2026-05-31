@@ -224,7 +224,7 @@ st.markdown("""
 <div class="terminal-header">
     <h1>📈 EOD SCREENER TERMINAL</h1>
     <div class="subtitle">Macro Regime Filter · Multi-Indicator Technical Screener · ATR Risk Engine · Trailing Exit Logic</div>
-    <div class="ticker-tape">●  LIVE EOD ANALYTICS  ●  YAHOO FINANCE DATA  ●  531 HIGH-MOMENTUM UNIVERSE  ●</div>
+    <div class="ticker-tape">●  LIVE EOD ANALYTICS  ●  ATR-BASED RISK MODEL  ●  LIQUIDITY-GATED UNIVERSE  ●</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -437,18 +437,23 @@ with st.sidebar:
     else:
         rsi_len, div_lookback = 14, 20
 
-    # Beta filter (volatility vs SPY)
-    beta_on = st.checkbox("✅ Beta filter (vs SPY)", value=True,
-                          help="Only keep stocks with beta above the threshold. "
-                               "High beta = high volatility = bigger moves.")
-    if beta_on:
-        beta_min = st.slider("  Minimum beta", 0.5, 3.0, 1.5, 0.1, key="beta_min",
-                            help="1.0 = moves with market. 1.5 = 50% more volatile. "
-                                 "2.0+ = aggressive, high-volatility names.")
-        beta_lb = st.slider("  Beta lookback (days)", 60, 504, 252, 21, key="beta_lb",
-                           help="How much history to use. 252 = 1 year.")
-    else:
-        beta_min, beta_lb = 1.5, 252
+    # ---- Mandatory liquidity & price floor (cannot be disabled) ----
+    st.markdown("---")
+    st.markdown("**🔒 Mandatory Liquidity Floor** *(cannot be disabled)*")
+    st.caption("Hard rules to prevent flagging untradeable penny stocks. "
+               "ATR/Keltner are the real volatility filters — Beta intentionally not used.")
+    min_price = st.number_input(
+        "Minimum price ($)",
+        min_value=0.5, max_value=50.0, value=2.0, step=0.5,
+        help="Reject stocks below this price. Defaults to $2 to avoid penny stocks "
+             "which have huge spreads and easy manipulation.",
+    )
+    min_avg_volume = st.number_input(
+        "Minimum avg daily volume (shares)",
+        min_value=50_000, max_value=10_000_000, value=500_000, step=50_000,
+        help="Reject illiquid names. 500K shares/day = you can enter/exit without "
+             "destroying price even on panic days.",
+    )
 
 
     # ---- Risk module --------------------------------------------------------
@@ -669,10 +674,9 @@ def build_config() -> dict:
         "divergence_enabled": divergence_on,
         "divergence_lookback": int(div_lookback),
         "rsi_length":         int(rsi_len),
-        # Beta filter
-        "beta_filter_enabled": beta_on,
-        "beta_min":            float(beta_min),
-        "beta_lookback":       int(beta_lb),
+        # Mandatory liquidity floors (always active, cannot be disabled)
+        "min_price":          float(min_price),
+        "min_avg_volume":     int(min_avg_volume),
     })
     cfg["risk"].update({
         "atr_length":             int(atr_len),
@@ -826,7 +830,7 @@ if "last_result" in st.session_state:
                        "Look for the biggest drop — that's where most candidates are eliminated.")
             funnel_rows = [
                 ("Evaluated (had data)",          diag.get("evaluated", 0)),
-                ("→ Beta filter passed",          diag.get("beta_ok", 0)),
+                ("→ Liquidity & price floor",     diag.get("liquidity_ok", 0)),
                 ("→ Sector strength OK",          diag.get("sector_rs_ok", 0)),
                 ("→ MA alignment",                diag.get("ma_alignment", 0)),
                 ("→ OBV breakout",                diag.get("obv_breakout", 0)),
@@ -945,12 +949,16 @@ It evaluates **3-4 checks**. If too many fail, the scanner halts before evaluati
 
 Each filter is **independent** and can be toggled ON/OFF. A stock must pass **all enabled filters** to be flagged as a "New Signal."
 
-#### Pre-filter: Beta filter (volatility vs SPY)
-- **What**: Computes each stock's β (beta) vs SPY over the last 252 trading days.
-- **Formula**: `β = Cov(stock_returns, spy_returns) / Var(spy_returns)`
-- **Interpretation**: β = 1.0 means moves with market. β = 1.5 means 50% more volatile. β = 2.0+ means aggressive/high-vol name.
-- **Default threshold**: 1.5 — we only want high-momentum, high-volatility names that can produce big moves.
-- **Why dynamic computation?** Because beta changes over time. A stock that was β=2.0 last year might be β=1.2 now. Pre-filtering by static beta lists goes stale fast.
+#### Pre-filter A: Liquidity & price floor (MANDATORY, cannot be disabled)
+- **Min price** (default $2): Rejects penny stocks. They have enormous spreads, are easily manipulated, and the R/R numbers look great on paper but evaporate on execution.
+- **Min avg volume** (default 500,000 shares/day): Rejects illiquid names. If you can't exit on a panic day without destroying the price, you don't really own a tradable position.
+- **Why it's not optional**: These aren't "preferences" — they're protection against scanning untradeable stocks. The scanner can be perfectly correct technically and still bankrupt you via slippage.
+
+#### Why we DON'T use a Beta filter (deliberate design choice)
+- **What Beta is**: An academic CAPM statistic measuring 1-year price covariance vs SPY.
+- **The problem**: It's a backward-looking measure of *past* volatility. A stock with Beta=0.7 last year that JUST started a clean breakout today is **exactly** what we want to catch — and a Beta filter would reject it.
+- **The conflict**: We already use ATR (real-time, absolute volatility) via Keltner channels, volume surge, and ATR-based stops. ATR is the technical analyst's volatility measure. Beta is the academic finance professor's. They don't belong in the same pipeline.
+- **What we do instead**: Beta is **computed and displayed** in the output table for reference, but never used to gate signals. The ATR-based filters do the real work.
 
 #### Filter 1: Moving Average alignment
 - **What**: Price > MA(fast) > MA(slow), e.g., Close > SMA(20) > SMA(50).
@@ -1035,7 +1043,9 @@ Macro and Risk modules are **NOT** overridden by profiles — macro is environme
 #### Trailing stop "ratchet"
 For positions in your portfolio:
 - As price rises, the stop ratchets **UP** (never down).
-- Trailing logic: `New Stop = max(Current Stop, Recent Low - 1 × ATR)`.
+- Trailing logic: `New Stop = max(Current Stop, Floor - ATR_multiplier × ATR)`
+- **The ATR multiplier matches your initial stop** — if you entered with a 2× ATR stop (Breakout profile), the trailing stop also uses 2× ATR. This gives the trade room to breathe through normal intraday noise instead of getting stopped out by a single wick.
+- **Floor**: The maximum of (recent swing low, trend SMA) — anchors the stop to meaningful support, not random low points.
 
 #### Volume-confirmed exit
 - **Why**: A stop hit on huge volume = distribution = real selling. A stop hit on light volume = noise — often whipsaws back up.
@@ -1250,7 +1260,7 @@ Each filter can be toggled. A stock must pass **ALL enabled filters** to be a "N
 
 | # | Filter | What it checks | Why |
 |---|---|---|---|
-| Pre | **Beta** | β vs SPY over 252 days | Only high-volatility names that move enough |
+| Pre | **Liquidity & price floor** 🔒 | Price ≥ $2 AND avg vol ≥ 500K | Prevents flagging untradeable penny stocks (mandatory) |
 | 1 | **MA alignment** | Price > SMA20 > SMA50 | Confirms multi-timeframe uptrend |
 | 2 | **OBV breakout** | OBV at 20-day high | Volume leading price = accumulation |
 | 3 | **Keltner breakout** | Close > Upper Keltner Band | Volatility breakout = momentum thrust |
@@ -1261,6 +1271,8 @@ Each filter can be toggled. A stock must pass **ALL enabled filters** to be a "N
 | 8* | **Reversal trigger** | Lower Keltner pierce + RSI oversold cross | For "reversal" strategy |
 
 *Filters 7-8 are used by their respective strategy profiles.
+
+> **Why no Beta filter?** Beta is an academic CAPM statistic measuring past 1-year covariance with SPY. It conflicts with the ATR/Keltner-based technical analysis we actually use, and would reject exactly the kind of setups we want — previously quiet stocks that JUST started a clean breakout. ATR is the technical analyst's true volatility measure. Beta is still **shown** in the output table for reference, never used to filter.
 
 ---
 
@@ -1280,7 +1292,7 @@ Defaults: 2.0× ATR (breakout) · 1.5× ATR (pullback) · 1.0× ATR (reversal)
 `R/R = (Target - Entry) / (Entry - Stop)` — Minimum 3.0 by default
 
 #### Trailing stop "ratchet"
-`New Stop = max(Current Stop, Recent Low - 1 × ATR)` — only moves up, never down
+`New Stop = max(Current Stop, Floor - ATR_multiplier × ATR)` — uses the **same** ATR multiplier as your entry stop (2× for Breakout, 1.5× for Pullback). Only moves up, never down. Gives the trade room to breathe through normal noise.
 
 #### Volume-confirmed exit
 Exit only if `Close < Stop` AND `Volume > Avg Volume` — avoids whipsaw exits on light volume.
