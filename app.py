@@ -205,10 +205,11 @@ st.markdown("""
         border-left-width: 4px !important;
     }
 
-    /* ---- Hide Streamlit branding ---- */
+    /* ---- Hide Streamlit branding (keep header visible for mobile sidebar toggle!) ---- */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* DO NOT hide `header` — that hides the hamburger menu (☰) on mobile,
+       which is the only way to open the sidebar on small screens. */
 
     /* ---- Section divider ---- */
     .section-divider {
