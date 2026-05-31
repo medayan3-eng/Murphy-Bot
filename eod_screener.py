@@ -95,10 +95,19 @@ DEFAULT_CONFIG = {
         "divergence_lookback":  20,
         "rsi_length":           14,
 
-        # Beta filter (volatility vs SPY)
-        "beta_filter_enabled":  True,
-        "beta_min":             1.5,
-        "beta_lookback":        252,    # ~1 year of trading days
+        # Liquidity & price floor — MANDATORY (cannot be disabled).
+        # Prevents the scanner from flagging illiquid penny stocks that
+        # look great on paper but can't be traded without massive slippage.
+        "min_price":            2.0,        # $2 floor — no penny stocks
+        "min_avg_volume":       500_000,    # 500K shares/day minimum
+
+        # NOTE: Beta filter intentionally removed from screener pipeline.
+        # ATR-based filters (Keltner channels, volume surge, ATR stops) are
+        # the TRUE technical volatility measures. Beta is an academic CAPM
+        # statistic computed over 252 days — it filters out exactly the
+        # stocks we want: previously quiet names that JUST started a
+        # volatility breakout today. Beta is still computed and DISPLAYED
+        # in the output table for reference, but never used to gate signals.
     },
 
     # ----- Module 3: Risk Management ----------------------------------------
@@ -819,7 +828,7 @@ def check_volume_exit(df: pd.DataFrame, trailing_stop: float) -> bool:
 
 
 # ==============================================================================
-# BETA  --  volatility relative to SPY
+# BETA  --  computed for INFORMATIONAL DISPLAY ONLY (not a filter)
 # ==============================================================================
 def compute_beta(stock_df: pd.DataFrame,
                  spy_df: Optional[pd.DataFrame],
@@ -827,6 +836,14 @@ def compute_beta(stock_df: pd.DataFrame,
     """
     Compute stock beta vs SPY using daily returns over `lookback` bars.
     beta = Cov(stock_ret, spy_ret) / Var(spy_ret).
+
+    NOTE: This value is shown in the output table for reference but is
+    NOT used to filter signals. Beta is an academic CAPM statistic and
+    conflicts with the ATR/Keltner-based technical analysis the scanner
+    actually relies on. A previously low-beta stock that JUST started a
+    volatility breakout is exactly the kind of setup we want to catch,
+    and a beta filter would reject it.
+
     Returns None if either series is too short or variance is zero.
     """
     if stock_df is None or spy_df is None or stock_df.empty or spy_df.empty:
@@ -854,17 +871,37 @@ def compute_beta(stock_df: pd.DataFrame,
     return float(cov / spy_var)
 
 
-def check_beta_filter(df: pd.DataFrame,
-                      cfg: dict,
-                      spy_df: Optional[pd.DataFrame]) -> tuple[bool, Optional[float]]:
-    """Returns (passes, computed_beta). Filter disabled => always passes."""
+# ==============================================================================
+# LIQUIDITY & PRICE FLOOR  --  mandatory pre-filter
+# ==============================================================================
+def check_liquidity(df: pd.DataFrame, cfg: dict) -> tuple[bool, float, float]:
+    """
+    Hard liquidity & price floor check. ALWAYS runs — cannot be disabled.
+
+    Rejects:
+      - Penny stocks (price < min_price) — too easy to manipulate, huge spreads
+      - Illiquid names (avg vol < min_avg_volume) — slippage destroys edge
+
+    Returns (passes, current_price, avg_volume).
+    """
     sc = cfg["screener"]
-    beta = compute_beta(df, spy_df, lookback=sc.get("beta_lookback", 252))
-    if not sc.get("beta_filter_enabled", False):
-        return True, beta
-    if beta is None:
-        return False, None
-    return beta >= sc.get("beta_min", 1.5), beta
+    min_price = sc.get("min_price", 2.0)
+    min_volume = sc.get("min_avg_volume", 500_000)
+
+    price = float(df["Close"].iloc[-1])
+    # 20-day average volume (or whatever VOL_SMA was configured to)
+    if "VOL_SMA" in df.columns and not pd.isna(df["VOL_SMA"].iloc[-1]):
+        avg_vol = float(df["VOL_SMA"].iloc[-1])
+    else:
+        avg_vol = float(df["Volume"].tail(20).mean())
+
+    if pd.isna(price) or pd.isna(avg_vol):
+        return False, price, avg_vol
+    if price < min_price:
+        return False, price, avg_vol
+    if avg_vol < min_volume:
+        return False, price, avg_vol
+    return True, price, avg_vol
 
 
 # ==============================================================================
@@ -884,7 +921,7 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> dict:
     candidates = []   # ALL evaluated tickers with their score
 
     diag = {
-        "evaluated": 0, "sector_rs_ok": 0, "beta_ok": 0,
+        "evaluated": 0, "sector_rs_ok": 0, "liquidity_ok": 0,
         "ma_alignment": 0, "obv_breakout": 0, "keltner_breakout": 0,
         "volume_surge": 0, "whipsaw_filter": 0, "divergence_ok": 0,
         "pullback_trigger": 0, "reversal_trigger": 0,
@@ -923,11 +960,16 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> dict:
             continue
         diag["evaluated"] += 1
 
-        # Beta filter (and beta computation for display, always run)
-        beta_ok, beta_val = check_beta_filter(df, cfg, spy_df)
-        if not beta_ok:
+        # Liquidity & price floor - MANDATORY pre-filter (cannot be disabled).
+        # Rejects penny stocks and illiquid names that can't be traded
+        # without massive slippage.
+        liq_ok, price_val, avg_vol_val = check_liquidity(df, cfg)
+        if not liq_ok:
             continue
-        diag["beta_ok"] += 1
+        diag["liquidity_ok"] += 1
+
+        # Beta computed for informational display only - NOT used for filtering.
+        beta_val = compute_beta(df, spy_df, lookback=252)
 
         # Sector strength
         sector_ok = True
