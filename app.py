@@ -34,17 +34,199 @@ from eod_screener import (
 # Page setup
 # ==============================================================================
 st.set_page_config(
-    page_title="EOD Stock Screener",
+    page_title="EOD Screener Terminal",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("📈 EOD Stock Screener & Portfolio Manager")
-st.caption(
-    "Macro kill-switch • Multi-filter EOD screener • ATR-based risk management "
-    "• Volume-confirmed trailing exits"
-)
+# ------------------------------------------------------------------------------
+# Professional dark "trading terminal" styling
+# ------------------------------------------------------------------------------
+st.markdown("""
+<style>
+    /* Import a professional monospace font for numbers */
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap');
+
+    /* ---- Global ---- */
+    html, body, [class*="css"] {
+        font-family: 'Inter', -apple-system, sans-serif !important;
+    }
+
+    /* ---- Main container ---- */
+    .main .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+        max-width: 1400px;
+    }
+
+    /* ---- Header banner (gradient with subtle border) ---- */
+    .terminal-header {
+        background: linear-gradient(135deg, #0a1929 0%, #1a3a5c 50%, #0d2847 100%);
+        padding: 1.5rem 2rem;
+        border-radius: 12px;
+        border-left: 4px solid #00d4ff;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 4px 20px rgba(0, 212, 255, 0.15);
+    }
+    .terminal-header h1 {
+        color: #ffffff !important;
+        font-size: 1.85rem !important;
+        font-weight: 700 !important;
+        margin: 0 !important;
+        letter-spacing: -0.5px;
+    }
+    .terminal-header .subtitle {
+        color: #8bb8d9;
+        font-size: 0.9rem;
+        margin-top: 0.4rem;
+        font-weight: 400;
+    }
+    .terminal-header .ticker-tape {
+        color: #00d4ff;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.75rem;
+        letter-spacing: 2px;
+        margin-top: 0.6rem;
+        opacity: 0.7;
+    }
+
+    /* ---- Section headers ---- */
+    h2, h3 {
+        color: #1a3a5c !important;
+        font-weight: 600 !important;
+        letter-spacing: -0.3px;
+    }
+
+    /* ---- Metric cards (top of main panel) ---- */
+    [data-testid="stMetricValue"] {
+        font-family: 'JetBrains Mono', monospace !important;
+        font-weight: 700 !important;
+        font-size: 1.6rem !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-weight: 500 !important;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        font-size: 0.72rem !important;
+        opacity: 0.75;
+    }
+    [data-testid="stMetric"] {
+        background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+        padding: 1rem 1.2rem;
+        border-radius: 10px;
+        border-left: 3px solid #00d4ff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+
+    /* ---- Buttons ---- */
+    .stButton button {
+        font-weight: 600 !important;
+        letter-spacing: 0.3px;
+        border-radius: 8px !important;
+        transition: all 0.2s ease;
+    }
+    .stButton button[kind="primary"] {
+        background: linear-gradient(135deg, #00a8cc 0%, #006d8f 100%) !important;
+        border: none !important;
+        box-shadow: 0 2px 8px rgba(0, 168, 204, 0.3);
+    }
+    .stButton button[kind="primary"]:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 4px 12px rgba(0, 168, 204, 0.5);
+    }
+
+    /* ---- Tabs ---- */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 4px;
+        border-bottom: 2px solid #e2e8f0;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-weight: 600 !important;
+        padding: 0.7rem 1.2rem !important;
+        border-radius: 8px 8px 0 0 !important;
+    }
+    .stTabs [aria-selected="true"] {
+        background: linear-gradient(180deg, #00d4ff20 0%, transparent 100%) !important;
+        border-bottom: 3px solid #00a8cc !important;
+    }
+
+    /* ---- DataFrames ---- */
+    .stDataFrame {
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    }
+
+    /* ---- Sidebar polish ---- */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+        border-right: 1px solid #e2e8f0;
+    }
+    [data-testid="stSidebar"] h2 {
+        color: #0a1929 !important;
+        font-size: 1.1rem !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid #00d4ff;
+        margin-bottom: 1rem !important;
+    }
+
+    /* ---- Status badges ---- */
+    .status-badge {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+    }
+    .status-green {
+        background: #d1fae5;
+        color: #065f46;
+        border: 1px solid #6ee7b7;
+    }
+    .status-yellow {
+        background: #fef3c7;
+        color: #92400e;
+        border: 1px solid #fcd34d;
+    }
+    .status-red {
+        background: #fee2e2;
+        color: #991b1b;
+        border: 1px solid #fca5a5;
+    }
+
+    /* ---- Info boxes ---- */
+    .stAlert {
+        border-radius: 8px !important;
+        border-left-width: 4px !important;
+    }
+
+    /* ---- Hide Streamlit branding ---- */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+
+    /* ---- Section divider ---- */
+    .section-divider {
+        height: 1px;
+        background: linear-gradient(90deg, transparent 0%, #cbd5e1 50%, transparent 100%);
+        margin: 2rem 0 1.5rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Professional header banner
+st.markdown("""
+<div class="terminal-header">
+    <h1>📈 EOD SCREENER TERMINAL</h1>
+    <div class="subtitle">Macro Regime Filter · Multi-Indicator Technical Screener · ATR Risk Engine · Trailing Exit Logic</div>
+    <div class="ticker-tape">●  LIVE EOD ANALYTICS  ●  YAHOO FINANCE DATA  ●  531 HIGH-MOMENTUM UNIVERSE  ●</div>
+</div>
+""", unsafe_allow_html=True)
 
 UNIVERSE_DIR = "universes"
 
@@ -576,12 +758,13 @@ if "last_result" in st.session_state:
 
     near_misses = result.get("near_misses", pd.DataFrame())
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         [f"🆕 New Signals ({len(new_signals)})",
          f"🎯 Top Near-Misses ({len(near_misses)})",
          f"📊 Portfolio ({len(portfolio_updates)})",
          "🌍 Macro Detail",
-         "🔍 Diagnostics"]
+         "🔍 Diagnostics",
+         "📚 How It Works"]
     )
 
     with tab1:
@@ -683,6 +866,274 @@ if "last_result" in st.session_state:
                 for t in tips:
                     st.markdown(t)
 
+    with tab6:
+        st.markdown("""
+## 📖 Complete Scanner Documentation
+
+This document explains in detail what the scanner does, how it works, what each indicator means,
+where data comes from, and how to interpret every output.
+
+---
+
+### 🎯 The Big Picture
+
+This is an **End-of-Day (EOD) stock screener** designed to find **swing-trade entries** with
+favorable risk/reward, while filtering out trades that go against the broader market.
+
+It runs **three independent modules** in sequence:
+
+1. **Module 1 — Macro Kill-Switch** — Is the overall market healthy enough to take trades?
+2. **Module 2 — EOD Screener** — Which stocks pass all technical filters today?
+3. **Module 3 — Portfolio Manager** — Update stops/exits on positions you already own.
+
+If Module 1 fails, Module 2 is **automatically skipped** — no new trades when the regime is hostile.
+Module 3 always runs, because risk management must continue regardless of regime.
+
+---
+
+### 📡 Data Source
+
+- **Primary source**: [Yahoo Finance](https://finance.yahoo.com) via the `yfinance` Python library.
+- **Frequency**: End-of-day OHLCV (Open, High, Low, Close, Volume) — daily bars only.
+- **History pulled**: 2 years per ticker (default), so we have enough data for 200-day moving averages and beta computation.
+- **Cost**: Free. No API key required.
+- **Limitations**: Yahoo data can have occasional gaps or delisted tickers. The scanner silently skips any ticker with fewer than 250 bars of history.
+- **Delay**: Yahoo Finance data updates after the US market closes (~4:30 PM ET / ~23:30 Israel time). Run the scanner after that for the freshest data.
+
+---
+
+### 🌍 MODULE 1 — Macro Kill-Switch
+
+**Purpose**: Stop generating buy signals when the overall market environment is dangerous.
+A great stock setup in a falling market is usually still a losing trade.
+
+It evaluates **3-4 checks**. If too many fail, the scanner halts before evaluating individual stocks.
+
+#### Check 1: SPY trend (S&P 500 above/below moving average)
+- **What**: Is SPY (the S&P 500 ETF) trading above its 50-day Simple Moving Average?
+- **Why**: SPY above SMA50 = market in uptrend = safer to buy. Below = downtrend = stand aside.
+- **Calculation**: Pull SPY's last 250 daily closes, compute `SMA(50)`, compare today's close to it.
+
+#### Check 2: VIX absolute level
+- **What**: Is the VIX (volatility index) below a threshold (default 25)?
+- **Why**: VIX above 25 = elevated fear = trades are riskier. VIX above 30 = panic territory.
+- **VIX zones**: <15 calm · 15-20 normal · 20-25 elevated · 25-30 stressed · >30 fear/panic.
+
+#### Check 3: VIX/VXV term structure
+- **What**: Ratio of VIX (1-month vol) to VXV (3-month vol).
+- **Why**: When **VIX > VXV** (ratio > 1.0), short-term fear is higher than long-term — typically a sign of acute stress and a contrarian buy signal *only after* the spike resolves.
+- **For buyers**: Default behavior is to require ratio < 1.0 (normal term structure).
+
+#### Check 4: Sector relative strength (per stock)
+- **What**: For each stock, compare its sector ETF's 60-day return to SPY's 60-day return.
+- **Why**: Buy stocks in **leading sectors**, avoid lagging ones.
+- **Mapping** (hardcoded by sector ETF):
+  - Tech → XLK · Healthcare → XLV · Financials → XLF · Energy → XLE
+  - Industrials → XLI · Consumer Discretionary → XLY · Staples → XLP
+  - Utilities → XLU · Materials → XLB · Real Estate → XLRE · Communications → XLC
+
+**Result**: Module 1 returns 🟢 GREEN / 🟡 YELLOW / 🔴 RED.
+- 🟢 = all checks pass → proceed to scan
+- 🟡 = mixed signals → scan but warn
+- 🔴 = market unsafe → halt scanner
+
+---
+
+### 🔬 MODULE 2 — EOD Technical Screener
+
+**Purpose**: Find stocks with clean technical setups for swing entries (typical 5-30 day holding period).
+
+Each filter is **independent** and can be toggled ON/OFF. A stock must pass **all enabled filters** to be flagged as a "New Signal."
+
+#### Pre-filter: Beta filter (volatility vs SPY)
+- **What**: Computes each stock's β (beta) vs SPY over the last 252 trading days.
+- **Formula**: `β = Cov(stock_returns, spy_returns) / Var(spy_returns)`
+- **Interpretation**: β = 1.0 means moves with market. β = 1.5 means 50% more volatile. β = 2.0+ means aggressive/high-vol name.
+- **Default threshold**: 1.5 — we only want high-momentum, high-volatility names that can produce big moves.
+- **Why dynamic computation?** Because beta changes over time. A stock that was β=2.0 last year might be β=1.2 now. Pre-filtering by static beta lists goes stale fast.
+
+#### Filter 1: Moving Average alignment
+- **What**: Price > MA(fast) > MA(slow), e.g., Close > SMA(20) > SMA(50).
+- **Why**: Confirms an established uptrend at multiple time scales.
+- **Defaults**: Fast=20, Slow=50. Can also use 50/200 for stronger trends.
+- **Murphy quote**: "The trend is your friend. MA alignment confirms the trend is intact."
+
+#### Filter 2: OBV (On-Balance Volume) breakout
+- **What**: Is OBV breaking above its highest level in the past N days (default 20)?
+- **Why**: OBV is a cumulative volume indicator. When OBV makes new highs **before** price, smart money is accumulating. Watch for the price to follow.
+- **Formula**: OBV adds volume on up days, subtracts it on down days.
+
+#### Filter 3: Keltner Channel breakout
+- **What**: Today's close > Upper Keltner Band (recent breakouts within last 5 days also count).
+- **Why**: Keltner Channels use ATR-based bands around an EMA. A close above the upper band = volatility breakout = momentum thrust.
+- **Formula**: Upper = EMA(20) + 1.5 × ATR(20). Tighter than Bollinger (which uses std dev).
+- **Lookback window**: Default 5 days — catches recent breakouts not just today's cross.
+
+#### Filter 4: Volume surge
+- **What**: Today's volume > N × the 20-day average volume (default 1.5x).
+- **Why**: Big volume confirms institutional participation, not retail-only moves.
+- **Tip**: Lower to 1.25 in quiet markets, raise to 2.0 to be very selective.
+
+#### Filter 5: Whipsaw filter
+- **What**: Did the stock recently chop sideways without a clear trend? If so, reject.
+- **Why**: Whipsaw markets eat your stop-losses. We want trending environments only.
+- **Calculation**: Looks at the spread between recent highs/lows vs ATR — if too small, the stock is range-bound.
+
+#### Filter 6: No bearish RSI divergence
+- **What**: Reject if price is making a new high but RSI is making a *lower* high.
+- **Why**: Classic warning sign that momentum is fading even as price rises — often precedes reversals.
+- **Default**: RSI(14), 20-day lookback for divergence detection.
+
+#### Optional Filter A: Pullback trigger (used by "pullback" strategy)
+- **What**: Did the stock pull back to its 50-day SMA and bounce, with RSI cooling from overbought to neutral?
+- **Why**: Buying dips in uptrends has higher win rate than chasing breakouts.
+
+#### Optional Filter B: Reversal trigger (used by "reversal" strategy)
+- **What**: Did price pierce the lower Keltner band and recover, with RSI crossing back above oversold?
+- **Why**: Mean-reversion setup for range-bound markets.
+
+---
+
+### 🎯 Strategy Profiles (Murphy-Inspired)
+
+A dropdown at the top of the main screen overrides Module 2 with one of three preset configurations:
+
+| Profile | Best For | Key Filters | Stop |
+|---|---|---|---|
+| **Custom** | DIY users | Whatever you set in sidebar | Sidebar setting |
+| **Breakout** | Strong trending markets | MA 20/50, Keltner 1.5x, Vol 1.25x, OBV ON, divergence OFF | 2.0 × ATR |
+| **Pullback** | Mid-trend dip buying | Pullback trigger + RSI cool-and-turn near 50-SMA | 1.5 × ATR |
+| **Reversal** | Range-bound markets | Reversal trigger + lower Keltner pierce + RSI oversold cross | 1.0 × ATR |
+
+Macro and Risk modules are **NOT** overridden by profiles — macro is environmental, risk is personal.
+
+---
+
+### 💰 MODULE 3 — Risk Management
+
+**Purpose**: For every signal AND every existing portfolio position, determine:
+1. Where to place the **initial stop loss**
+2. Where to set the **target** (for R/R calculation)
+3. How many **shares to buy** based on your risk tolerance
+4. Whether to **update trailing stops** on existing positions
+5. Whether **volume-confirmed exit** is triggered
+
+#### Position sizing — the math
+- **Inputs**: Total equity ($), Risk per trade (%), Entry price, Stop price.
+- **Formula**: `Shares = (Equity × Risk%) / (Entry - Stop)`
+- **Example**: $10,000 equity, 2% risk = $200 risk budget. Entry $50, Stop $48 = $2 risk per share. Shares = $200 / $2 = **100 shares**.
+
+#### ATR-based stop loss
+- **Why ATR (Average True Range)?** Volatility-adjusted stops — wider stops for volatile stocks, tighter for calm ones.
+- **Formula**: `Initial Stop = Entry - (ATR_multiplier × ATR(14))`
+- **Defaults**: 2.0× ATR for breakout, 1.5× for pullback, 1.0× for reversal.
+
+#### Target & R/R gating
+- **Target**: Calculated based on recent swing high or N × ATR projection.
+- **R/R Ratio**: `(Target - Entry) / (Entry - Stop)`. Default minimum = **3.0** — only take trades where potential upside is 3× the risk.
+
+#### Trailing stop "ratchet"
+For positions in your portfolio:
+- As price rises, the stop ratchets **UP** (never down).
+- Trailing logic: `New Stop = max(Current Stop, Recent Low - 1 × ATR)`.
+
+#### Volume-confirmed exit
+- **Why**: A stop hit on huge volume = distribution = real selling. A stop hit on light volume = noise — often whipsaws back up.
+- **Logic**: Only exit if `Close < Stop` AND `Volume > Average Volume`.
+
+---
+
+### 📊 Output Tabs Explained
+
+#### 🆕 New Signals
+Stocks that passed **ALL** enabled filters today. Each row shows:
+- **Entry_Price** — current close
+- **Initial_Stop** — where to set stop-loss order
+- **Target** — where to take profit (or trail from)
+- **R_R_Ratio** — risk/reward ratio
+- **Shares_To_Buy** — calculated by position sizer
+- **Risk_$** — dollar amount at risk if stopped out
+- **Beta** — volatility vs SPY
+
+#### 🎯 Top Near-Misses
+The 10 highest-scoring stocks that **didn't** pass all filters. Each shows:
+- **Score** — % of enabled filters passed
+- **Passed** — which filters this stock satisfies
+- **Failed** — which filters this stock is missing
+- Color coded: 🟢 ≥80% · 🟡 60-80% · 🔴 <60%
+
+Use this to find setups that may trigger in the next 1-3 days.
+
+#### 📊 Portfolio
+For each position you uploaded:
+- **Action** — HOLD / EXIT / UPDATE_STOP
+- **Trailing_Stop** — new ratcheted stop level
+- **P_L_%** — current profit/loss percentage
+- **Reason** — why this action was chosen
+
+#### 🌍 Macro Detail
+Detailed breakdown of every macro check with its raw values.
+
+#### 🔍 Diagnostics
+Funnel view: how many tickers passed each filter step. Auto-suggestions appear when 0 final signals are found.
+
+---
+
+### ⚙️ Configuration: What Each Setting Means
+
+#### Universe
+- **🔥 High-Momentum (531)** — Curated high-beta names from Finviz Beta>1.5 filter
+- **S&P 500** — Large caps only
+- **Russell 2000** — Small caps
+- **Custom / Upload** — Your own list
+
+#### Account
+- **Total equity** — Used only for position sizing calculation
+- **Risk per trade %** — Max % of equity at risk on one trade (default 2%)
+
+#### Module 1 — Macro
+- All four checks can be individually toggled
+- Thresholds (SMA length, VIX level) configurable
+
+#### Module 2 — Screener
+- Each filter has ON/OFF toggle
+- Sub-parameters appear only when filter is enabled
+
+---
+
+### 🧮 Performance Notes
+
+- **531 tickers** ≈ 2-4 minutes per full scan
+- **2,400 tickers** (S&P+R2K) ≈ 5-8 minutes
+- Most time is spent downloading from Yahoo (network-bound)
+- Indicator computation is fast (~10ms per ticker)
+- Use the **Max tickers** slider to cap if testing
+
+---
+
+### ⚠️ Limitations & Honest Caveats
+
+1. **Past data only** — All filters are based on historical OHLCV. No fundamentals, no news, no earnings dates.
+2. **No tick data** — EOD bars only. Intraday signals require different infrastructure.
+3. **Yahoo data quality** — Generally good but occasional bad ticks. Use as one input, not gospel.
+4. **No backtest engine yet** — These filters are based on Murphy's classic patterns but haven't been statistically backtested here.
+5. **Not financial advice** — This is a tool to find candidates worth researching, not a list of stocks to blindly buy.
+
+---
+
+### 📚 Background Reading
+
+The filter logic is inspired by:
+- **John Murphy** — *Technical Analysis of the Financial Markets*
+- **Alexander Elder** — *Trading for a Living* (Triple Screen system)
+- **Van K. Tharp** — *Trade Your Way to Financial Freedom* (position sizing math)
+- **Linda Raschke** — Volume-confirmed exits
+
+---
+
+*Built with Python, pandas, pandas-ta-classic, yfinance, and Streamlit.*
+        """)
+
     # Downloads
     st.markdown("### 💾 Download")
     c1, c2, c3 = st.columns(3)
@@ -715,4 +1166,144 @@ if "last_result" in st.session_state:
             )
 
 else:
-    st.info("👈 Configure in the sidebar, optionally upload a portfolio, then click **Run EOD scan**.")
+    # Welcome screen when no scan has been run yet
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        st.markdown("""
+        ### 👋 Welcome to EOD Screener Terminal
+
+        This is a **professional-grade end-of-day stock screener** that combines:
+
+        - 🌍 **Macro regime filter** — only trade when conditions favor longs
+        - 🔬 **9 technical indicators** — MA alignment, OBV, Keltner, RSI divergence, beta, and more
+        - 💰 **ATR-based risk engine** — automatic stops and position sizing
+        - 🎯 **Strategy profiles** — preset configurations for breakout, pullback, or reversal trades
+
+        **To get started:**
+        1. 👈 Configure your universe and filters in the sidebar
+        2. (Optional) Upload your current portfolio CSV for tracking
+        3. Click **🚀 Run EOD scan** at the top
+
+        While the scan runs, the progress bar will show what's happening.
+        Typical scan times: 531 tickers ≈ 3 min, 2,400 tickers ≈ 6 min.
+        """)
+    with col_b:
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#1a3a5c,#0a1929);padding:1.5rem;border-radius:10px;color:#fff;">
+        <h4 style="color:#00d4ff;margin-top:0;">📊 Quick Stats</h4>
+        <p style="margin:0.3rem 0;"><b>Universe</b>: 531 high-beta stocks</p>
+        <p style="margin:0.3rem 0;"><b>Data</b>: Yahoo Finance EOD</p>
+        <p style="margin:0.3rem 0;"><b>Indicators</b>: 9 technical filters</p>
+        <p style="margin:0.3rem 0;"><b>Risk model</b>: ATR-based</p>
+        <p style="margin:0.3rem 0;"><b>Cost</b>: Free</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+    with st.expander("📖 **What does this scanner actually do?** (Click to expand full documentation)", expanded=False):
+        st.markdown("""
+### The Big Picture
+
+This is an **End-of-Day (EOD) stock screener** designed to find **swing-trade entries** with
+favorable risk/reward, while filtering out trades that go against the broader market.
+
+It runs **three independent modules** in sequence:
+
+1. **Module 1 — Macro Kill-Switch** — Is the overall market healthy enough to take trades?
+2. **Module 2 — EOD Screener** — Which stocks pass all technical filters today?
+3. **Module 3 — Portfolio Manager** — Update stops/exits on positions you already own.
+
+If Module 1 fails, Module 2 is **automatically skipped** — no new trades when the regime is hostile.
+Module 3 always runs, because risk management must continue regardless of regime.
+
+---
+
+### 📡 Data Source: Yahoo Finance
+
+- **Source**: [Yahoo Finance](https://finance.yahoo.com) via `yfinance` Python library
+- **Frequency**: End-of-day OHLCV bars (daily)
+- **History**: 2 years per ticker
+- **Cost**: Free, no API key
+- **Caveat**: Run after US market close (~23:30 Israel time) for freshest data
+
+---
+
+### 🌍 MODULE 1 — Macro Kill-Switch
+
+**Stops the scanner when the market environment is hostile.** A great setup in a falling market is usually still a losing trade.
+
+**4 checks**:
+
+1. **SPY trend** — Is S&P 500 above its 50-day SMA? Below = downtrend, stand aside.
+2. **VIX level** — Below 25? Above = elevated fear → riskier trades.
+3. **VIX/VXV ratio** — Below 1.0? Above = acute short-term stress.
+4. **Sector RS** — For each stock, is its sector ETF outperforming SPY over 60 days?
+
+**Result**: 🟢 GREEN (all pass) · 🟡 YELLOW (mixed) · 🔴 RED (halt scanner)
+
+---
+
+### 🔬 MODULE 2 — Technical Screener
+
+Each filter can be toggled. A stock must pass **ALL enabled filters** to be a "New Signal."
+
+| # | Filter | What it checks | Why |
+|---|---|---|---|
+| Pre | **Beta** | β vs SPY over 252 days | Only high-volatility names that move enough |
+| 1 | **MA alignment** | Price > SMA20 > SMA50 | Confirms multi-timeframe uptrend |
+| 2 | **OBV breakout** | OBV at 20-day high | Volume leading price = accumulation |
+| 3 | **Keltner breakout** | Close > Upper Keltner Band | Volatility breakout = momentum thrust |
+| 4 | **Volume surge** | Today's vol > 1.5× avg(20) | Institutional participation |
+| 5 | **Whipsaw filter** | Trend is clean, not choppy | Avoid range-bound chop |
+| 6 | **RSI divergence** | No bearish divergence | Catch momentum loss early |
+| 7* | **Pullback trigger** | Bounce off SMA50 + RSI cool-and-turn | For "pullback" strategy |
+| 8* | **Reversal trigger** | Lower Keltner pierce + RSI oversold cross | For "reversal" strategy |
+
+*Filters 7-8 are used by their respective strategy profiles.
+
+---
+
+### 💰 MODULE 3 — Risk Management
+
+#### Position sizing math
+`Shares = (Equity × Risk%) / (Entry - Stop)`
+
+Example: $10,000 equity, 2% risk, Entry $50, Stop $48 → $200 risk / $2 per share = **100 shares**
+
+#### ATR-based stop loss
+`Initial Stop = Entry - (ATR_multiplier × ATR(14))`
+
+Defaults: 2.0× ATR (breakout) · 1.5× ATR (pullback) · 1.0× ATR (reversal)
+
+#### R/R ratio gate
+`R/R = (Target - Entry) / (Entry - Stop)` — Minimum 3.0 by default
+
+#### Trailing stop "ratchet"
+`New Stop = max(Current Stop, Recent Low - 1 × ATR)` — only moves up, never down
+
+#### Volume-confirmed exit
+Exit only if `Close < Stop` AND `Volume > Avg Volume` — avoids whipsaw exits on light volume.
+
+---
+
+### 🎯 Strategy Profiles
+
+A dropdown at the top of the page overrides Module 2:
+
+- **Custom** — Use sidebar settings as-is
+- **Breakout** — Pure momentum: MA 20/50, Keltner 1.5×, Vol 1.25×, OBV ON, divergence OFF, stop 2× ATR
+- **Pullback** — Dip-buy: pullback trigger near SMA50, RSI cool-and-turn, stop 1.5× ATR
+- **Reversal** — Range-bound: lower Keltner pierce + RSI oversold cross, stop 1× ATR
+
+---
+
+### 📊 Outputs
+
+- **New Signals** — Stocks passing ALL filters today
+- **Top Near-Misses** — 10 closest setups (might trigger soon)
+- **Portfolio** — Updated stops/actions for owned positions
+- **Macro Detail** — Raw values of every macro check
+- **Diagnostics** — Funnel: how many stocks passed each step
+        """)
+    st.info("👈 Configure in the sidebar, optionally upload a portfolio, then click **🚀 Run EOD scan**.")
