@@ -611,15 +611,37 @@ st.markdown("---")
 left, right = st.columns([1, 1])
 with left:
     st.subheader("📁 Existing portfolio (optional)")
-    port_up = st.file_uploader("CSV: Ticker, Entry_Price, Entry_Date",
-                               type=["csv", "xlsx"], key="port_up")
+    port_up = st.file_uploader(
+        "Upload CSV or Excel with columns: Ticker, Entry_Price, Entry_Date "
+        "(Shares optional)",
+        type=["csv", "xlsx"], key="port_up",
+    )
     portfolio_df = None
     if port_up is not None:
-        if port_up.name.lower().endswith(".xlsx"):
-            portfolio_df = pd.read_excel(port_up)
-        else:
-            portfolio_df = pd.read_csv(port_up)
-        st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
+        try:
+            if port_up.name.lower().endswith(".xlsx"):
+                # Explicit engine + read first sheet, drop fully-empty rows
+                portfolio_df = pd.read_excel(port_up, engine="openpyxl", sheet_name=0)
+            else:
+                portfolio_df = pd.read_csv(port_up)
+            # Clean up: drop rows where ALL relevant columns are NaN
+            portfolio_df = portfolio_df.dropna(how="all")
+            # Drop rows missing Ticker (likely empty template rows)
+            if "Ticker" in portfolio_df.columns:
+                portfolio_df = portfolio_df[portfolio_df["Ticker"].notna()]
+                portfolio_df = portfolio_df.reset_index(drop=True)
+            if portfolio_df.empty:
+                st.warning("⚠️ No valid rows found in the uploaded file. "
+                          "Make sure you have at least one row with a Ticker.")
+                portfolio_df = None
+            else:
+                st.success(f"✅ Loaded {len(portfolio_df)} position(s)")
+                st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.error(f"❌ Couldn't read the file: {type(e).__name__}: {e}")
+            st.caption("Make sure columns are exactly: **Ticker**, **Entry_Price**, **Entry_Date** "
+                       "(headers in row 1). Download the template above for the correct format.")
+            portfolio_df = None
     else:
         sample_path = "portfolio_sample.csv"
         if os.path.exists(sample_path):
