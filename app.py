@@ -803,7 +803,21 @@ if "last_result" in st.session_state:
                             "candidates that missed only 1-2 filters. They might be worth "
                             "watching tomorrow.")
         else:
-            st.dataframe(new_signals, use_container_width=True, hide_index=True)
+            st.dataframe(
+                new_signals,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score":         st.column_config.NumberColumn("Score", format="%.0f%%"),
+                    "Entry_Price":   st.column_config.NumberColumn("Entry", format="$%.2f"),
+                    "Initial_Stop":  st.column_config.NumberColumn("Stop",  format="$%.2f"),
+                    "Target":        st.column_config.NumberColumn("Target", format="$%.2f"),
+                    "R_R_Ratio":     st.column_config.NumberColumn("R/R",   format="%.2f"),
+                    "Shares_To_Buy": st.column_config.NumberColumn("Shares", format="%d"),
+                    "Risk_$":        st.column_config.NumberColumn("Risk $", format="$%.2f"),
+                    "Beta":          st.column_config.NumberColumn("Beta",   format="%.2f"),
+                },
+            )
             tot_risk = new_signals["Risk_$"].sum()
             st.metric("Total $ at risk across new signals", f"${tot_risk:,.2f}")
 
@@ -814,15 +828,17 @@ if "last_result" in st.session_state:
         else:
             st.caption("Top 10 stocks ranked by % of filters passed. "
                        "Use this to find stocks that are CLOSE to triggering — they may set up over the next few days.")
-            # Color scoring
-            def _score_color(v):
-                if v >= 80:   return "background-color:#1f5a1f"  # green
-                if v >= 60:   return "background-color:#5a5a1f"  # yellow
-                return "background-color:#5a1f1f"                # red
-            def _style_row(row):
-                return [_score_color(row["Score"])] * len(row)
-            st.dataframe(near_misses.style.apply(_style_row, axis=1),
-                         use_container_width=True, hide_index=True)
+            # Clean number formatting, no row background colors
+            st.dataframe(
+                near_misses,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.NumberColumn("Score", format="%.0f%%"),
+                    "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
+                    "Beta":  st.column_config.NumberColumn("Beta",  format="%.2f"),
+                },
+            )
             st.caption("**Score** = % of enabled filters passed. "
                        "**Passed** = which filters this stock satisfies. "
                        "**Failed** = which filters this stock is missing.")
@@ -831,12 +847,27 @@ if "last_result" in st.session_state:
         if portfolio_updates.empty:
             st.info("No portfolio positions to evaluate.")
         else:
-            def _row_style(row):
-                if row["Action"] == "SELL":   return ["background-color:#5a1f1f"] * len(row)
-                if row["Action"] == "HOLD":   return ["background-color:#1f3a1f"] * len(row)
-                return [""] * len(row)
-            st.dataframe(portfolio_updates.style.apply(_row_style, axis=1),
-                         use_container_width=True, hide_index=True)
+            # Clean numeric formatting, no row coloring
+            col_cfg = {}
+            for col in portfolio_updates.columns:
+                lc = col.lower()
+                if lc in ("entry_price", "current_price", "stop", "trailing_stop",
+                          "target", "atr", "initial_stop"):
+                    col_cfg[col] = st.column_config.NumberColumn(col, format="$%.2f")
+                elif lc in ("p_l_%", "pl_pct", "pnl_%", "return_%"):
+                    col_cfg[col] = st.column_config.NumberColumn(col, format="%.2f%%")
+                elif lc in ("beta",):
+                    col_cfg[col] = st.column_config.NumberColumn(col, format="%.2f")
+                elif lc in ("shares",):
+                    col_cfg[col] = st.column_config.NumberColumn(col, format="%d")
+                elif lc in ("days_held", "days"):
+                    col_cfg[col] = st.column_config.NumberColumn(col, format="%d")
+            st.dataframe(
+                portfolio_updates,
+                use_container_width=True,
+                hide_index=True,
+                column_config=col_cfg,
+            )
 
     with tab4:
         macro_df = pd.DataFrame(list(macro_info.items()),
