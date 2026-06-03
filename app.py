@@ -485,29 +485,58 @@ st.caption(
 
 profile_keys   = list(STRATEGY_PROFILES.keys())
 profile_labels = [STRATEGY_PROFILES[k]["label"] for k in profile_keys]
+# Add a virtual "best_of_all" option that runs all 3 real profiles
+BEST_OF_ALL_LABEL = "🏆 Best of All Profiles — Top 5 strongest across breakout + pullback + reversal"
+profile_labels_ext = profile_labels + [BEST_OF_ALL_LABEL]
 selected_label = st.selectbox(
-    "Choose a strategy", profile_labels, index=0,
+    "Choose a strategy", profile_labels_ext, index=0,
     help="Selecting a profile auto-overrides Module 2 filters. "
-         "Module 1 (macro) and Module 3 (risk) stay as configured."
+         "Module 1 (macro) and Module 3 (risk) stay as configured. "
+         "'Best of All' runs all three trading profiles and surfaces the "
+         "5 strongest setups overall — no matter which profile flagged them."
 )
-selected_profile = profile_keys[profile_labels.index(selected_label)]
+if selected_label == BEST_OF_ALL_LABEL:
+    selected_profile = "best_of_all"
+else:
+    selected_profile = profile_keys[profile_labels.index(selected_label)]
 
 # Show description
-desc = STRATEGY_PROFILES[selected_profile].get("description", "")
-if desc:
-    if selected_profile == "custom":
-        st.info(f"ℹ️ {desc}")
-    else:
-        st.success(f"✅ **Active profile:** {desc}")
-        with st.expander("See what this profile overrides"):
-            prof = STRATEGY_PROFILES[selected_profile]
-            if "screener" in prof:
-                st.markdown("**Screener (Module 2) overrides:**")
-                screener_df = pd.DataFrame(
-                    [(k, str(v)) for k, v in prof["screener"].items()],
-                    columns=["Setting", "Value"]
-                )
-                st.dataframe(screener_df, use_container_width=True, hide_index=True)
+if selected_profile == "best_of_all":
+    st.success("🏆 **Best of All mode active** — the scanner will evaluate every stock against ALL three profiles (breakout, pullback, reversal) and return the Top 5 strongest candidates overall. Full signals always rank above near-misses; within each tier, ranking is by R/R (signals) or filter pass rate (near-misses).")
+    with st.expander("How does this work?"):
+        st.markdown("""
+**Step 1.** Download data once for the universe.
+
+**Step 2.** For each of the 3 profiles (breakout, pullback, reversal):
+- Apply that profile's filter configuration
+- Run every stock through the filters
+- Collect signals (full pass) and near-misses (partial pass)
+- Tag each result with the profile name
+
+**Step 3.** Pool all results, deduplicate by ticker (keep the highest-scoring instance), and rank:
+- ✅ Full signals first (passed every filter + R/R ≥ minimum)
+- 🎯 Near-misses second (didn't pass everything but close)
+
+**Step 4.** Return the top 5 — they could be all from one profile, or 2-2-1, or any mix. The selection is purely by strength.
+
+This is the most permissive mode — it surfaces the absolute best setups regardless of market regime classification.
+""")
+else:
+    desc = STRATEGY_PROFILES[selected_profile].get("description", "")
+    if desc:
+        if selected_profile == "custom":
+            st.info(f"ℹ️ {desc}")
+        else:
+            st.success(f"✅ **Active profile:** {desc}")
+            with st.expander("See what this profile overrides"):
+                prof = STRATEGY_PROFILES[selected_profile]
+                if "screener" in prof:
+                    st.markdown("**Screener (Module 2) overrides:**")
+                    screener_df = pd.DataFrame(
+                        [(k, str(v)) for k, v in prof["screener"].items()],
+                        columns=["Setting", "Value"]
+                    )
+                    st.dataframe(screener_df, use_container_width=True, hide_index=True)
             if "risk" in prof:
                 st.markdown("**Risk (Module 3) overrides:**")
                 risk_df = pd.DataFrame(
@@ -713,8 +742,13 @@ def build_config() -> dict:
         "trailing_sma_length":    int(trail_sma),
     })
 
-    # Apply strategy profile LAST so it overrides sidebar settings
-    cfg = apply_strategy_profile(cfg, selected_profile)
+    # Apply strategy profile LAST so it overrides sidebar settings.
+    # 'best_of_all' is a virtual profile — leave sidebar settings as base
+    # and flag the engine to run all 3 real profiles internally.
+    if selected_profile == "best_of_all":
+        cfg["best_of_all_mode"] = True
+    else:
+        cfg = apply_strategy_profile(cfg, selected_profile)
     return cfg
 
 
@@ -784,15 +818,86 @@ if "last_result" in st.session_state:
         s4.metric("Total scan time", f"{stats.get('t_download_s', 0) + stats.get('t_indicators_s', 0) + stats.get('t_screen_s', 0):.1f}s")
 
     near_misses = result.get("near_misses", pd.DataFrame())
+    best_of_all = result.get("best_of_all")  # None unless best_of_all mode was on
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
-        [f"🆕 New Signals ({len(new_signals)})",
-         f"🎯 Top Near-Misses ({len(near_misses)})",
-         f"📊 Portfolio ({len(portfolio_updates)})",
-         "🌍 Macro Detail",
-         "🔍 Diagnostics",
-         "📚 How It Works"]
-    )
+    if best_of_all is not None:
+        # Best-of-All mode: show the special top-5 tab as the FIRST tab
+        top_picks = best_of_all.get("top_picks", pd.DataFrame())
+        tab_boa, tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            [f"🏆 Top 5 Best Picks ({len(top_picks)})",
+             f"🆕 New Signals ({len(new_signals)})",
+             f"🎯 Top Near-Misses ({len(near_misses)})",
+             f"📊 Portfolio ({len(portfolio_updates)})",
+             "🌍 Macro Detail",
+             "🔍 Diagnostics",
+             "📚 How It Works"]
+        )
+
+        with tab_boa:
+            if top_picks.empty:
+                st.info("No candidates qualified across any of the 3 profiles. "
+                        "Either the macro environment blocked everything or no stocks "
+                        "have enough indicator strength right now.")
+            else:
+                st.markdown(
+                    "### 🏆 Top 5 Strongest Setups Across All Profiles\n"
+                    "These are the **5 strongest candidates** from running every stock "
+                    "through **all three profiles** (Breakout · Pullback · Reversal). "
+                    "Each row is tagged with the profile that flagged it. Full signals "
+                    "always rank above near-misses."
+                )
+
+                # Reorder columns so Type/Profile are visible first
+                preferred = ["Type", "Profile", "Ticker", "Score", "Price", "Beta",
+                             "Entry_Price", "Initial_Stop", "Target", "R_R_Ratio",
+                             "Shares_To_Buy", "Risk_$", "Passed", "Failed"]
+                cols_order = [c for c in preferred if c in top_picks.columns]
+                cols_order += [c for c in top_picks.columns if c not in cols_order]
+                display_df = top_picks[cols_order]
+
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Score":         st.column_config.NumberColumn("Score",  format="%.0f%%"),
+                        "Price":         st.column_config.NumberColumn("Price",  format="$%.2f"),
+                        "Entry_Price":   st.column_config.NumberColumn("Entry",  format="$%.2f"),
+                        "Initial_Stop":  st.column_config.NumberColumn("Stop",   format="$%.2f"),
+                        "Target":        st.column_config.NumberColumn("Target", format="$%.2f"),
+                        "R_R_Ratio":     st.column_config.NumberColumn("R/R",    format="%.2f"),
+                        "Shares_To_Buy": st.column_config.NumberColumn("Shares", format="%d"),
+                        "Risk_$":        st.column_config.NumberColumn("Risk $", format="$%.2f"),
+                        "Beta":          st.column_config.NumberColumn("Beta",   format="%.2f"),
+                    },
+                )
+
+                # Profile distribution summary
+                if "Profile" in top_picks.columns:
+                    st.markdown("#### Profile breakdown:")
+                    profile_counts = top_picks["Profile"].value_counts()
+                    cols = st.columns(len(profile_counts))
+                    for i, (prof, count) in enumerate(profile_counts.items()):
+                        cols[i].metric(f"{prof}", f"{count} pick(s)")
+
+                # Show per-profile counts
+                with st.expander("📊 Per-profile evaluation details"):
+                    pp = best_of_all.get("per_profile", {})
+                    for prof_name, prof_result in pp.items():
+                        n_sig = len(prof_result.get("signals", []))
+                        n_nm  = len(prof_result.get("near_misses", []))
+                        st.markdown(f"**{prof_name.capitalize()}**: "
+                                    f"{n_sig} full signals · {n_nm} near-misses")
+    else:
+        # Normal single-profile mode: standard 6 tabs
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            [f"🆕 New Signals ({len(new_signals)})",
+             f"🎯 Top Near-Misses ({len(near_misses)})",
+             f"📊 Portfolio ({len(portfolio_updates)})",
+             "🌍 Macro Detail",
+             "🔍 Diagnostics",
+             "📚 How It Works"]
+        )
 
     with tab1:
         if new_signals.empty:
