@@ -326,6 +326,27 @@ with st.sidebar:
         custom_universe = custom_universe[:max_tickers]
     st.caption(f"**{len(custom_universe)}** of {universe_size} tickers selected")
 
+    # ---- 52-week uptrend pre-filter ----------------------------------------
+    uptrend_52w_on = st.checkbox(
+        "📈 Only stocks in 52-week uptrend",
+        value=False,
+        help="Pre-filter: keep only stocks where today's price is above its "
+             "200-day SMA AND has gained over the past 52 weeks. "
+             "This rejects downtrending names BEFORE the technical screener runs, "
+             "ensuring you only look at stocks the long-term trend supports.",
+    )
+    if uptrend_52w_on:
+        uptrend_min_gain = st.slider(
+            "  Minimum 52-week gain (%)",
+            min_value=0, max_value=100, value=0, step=5,
+            help="0 means 'just needs to be positive'. Set higher to demand stronger trends "
+                 "(e.g. 20 = only stocks up at least 20% YoY).",
+            key="uptrend_52w_min_gain",
+        )
+        st.caption("✅ Only stocks above their 200-SMA AND with positive 52-week return will be scanned.")
+    else:
+        uptrend_min_gain = 0
+
     # ---- Equity & risk ------------------------------------------------------
     st.subheader("Account")
     total_equity      = st.slider("Total equity ($)",
@@ -729,6 +750,9 @@ def build_config() -> dict:
         # Mandatory liquidity floors (always active, cannot be disabled)
         "min_price":          float(min_price),
         "min_avg_volume":     int(min_avg_volume),
+        # 52-week uptrend pre-filter
+        "uptrend_52w_enabled":  bool(uptrend_52w_on),
+        "uptrend_52w_min_gain": float(uptrend_min_gain),
     })
     cfg["risk"].update({
         "atr_length":             int(atr_len),
@@ -990,6 +1014,7 @@ if "last_result" in st.session_state:
             funnel_rows = [
                 ("Evaluated (had data)",          diag.get("evaluated", 0)),
                 ("→ Liquidity & price floor",     diag.get("liquidity_ok", 0)),
+                ("→ 52-week uptrend",             diag.get("uptrend_52w_ok", 0)),
                 ("→ Sector strength OK",          diag.get("sector_rs_ok", 0)),
                 ("→ MA alignment",                diag.get("ma_alignment", 0)),
                 ("→ OBV breakout",                diag.get("obv_breakout", 0)),
