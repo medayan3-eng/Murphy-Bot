@@ -1090,6 +1090,87 @@ def evaluate_portfolio(cfg: dict, data_cache: dict, portfolio: pd.DataFrame) -> 
     return pd.DataFrame(rows)
 
 
+def evaluate_best_of_all_profiles(base_cfg: dict, data_cache: dict, top_n: int = 5) -> dict:
+    """
+    Run ALL three strategy profiles (breakout, pullback, reversal) against the same
+    data_cache, then return the Top N strongest candidates overall — regardless of
+    which profile flagged them.
+
+    Each candidate is tagged with the profile that produced it. If the same ticker
+    shows up in multiple profiles, we keep the highest-scoring instance.
+
+    Ranking logic:
+      1. Full signals (passed ALL filters, R/R met) ALWAYS rank above near-misses.
+      2. Within signals: rank by R/R ratio descending (best risk/reward first).
+      3. Within near-misses: rank by Score (% of filters passed) descending.
+
+    Returns dict with: top_picks (DataFrame), per_profile (dict of profile -> result),
+                       combined_diagnostics (dict).
+    """
+    profile_keys = ["breakout", "pullback", "reversal"]
+    per_profile = {}
+    combined_diag = {}
+
+    for pk in profile_keys:
+        cfg_p = deepcopy(base_cfg)
+        cfg_p = apply_strategy_profile(cfg_p, pk)
+        res = evaluate_new_signals(cfg_p, data_cache)
+        per_profile[pk] = res
+        # aggregate diagnostics (max across profiles, since each is independent)
+        for k, v in res["diagnostics"].items():
+            combined_diag[k] = max(combined_diag.get(k, 0), v)
+
+    # Collect every candidate from every profile, tagged with profile name
+    all_picks = []
+
+    # ---- Full signals (highest priority) ----
+    for pk in profile_keys:
+        sig_df = per_profile[pk]["signals"]
+        if sig_df.empty:
+            continue
+        for _, row in sig_df.iterrows():
+            d = row.to_dict()
+            d["Profile"] = pk.capitalize()
+            d["Type"] = "✅ SIGNAL"
+            d["Rank_Key"] = (1, float(d.get("R_R_Ratio", 0)))  # higher R/R = better
+            all_picks.append(d)
+
+    # ---- Near-misses (secondary priority) ----
+    for pk in profile_keys:
+        nm_df = per_profile[pk]["near_misses"]
+        if nm_df.empty:
+            continue
+        for _, row in nm_df.iterrows():
+            d = row.to_dict()
+            d["Profile"] = pk.capitalize()
+            d["Type"] = "🎯 NEAR-MISS"
+            d["Rank_Key"] = (0, float(d.get("Score", 0)))  # higher Score = better
+            all_picks.append(d)
+
+    # ---- Deduplicate by ticker (keep best version) ----
+    best_by_ticker = {}
+    for p in all_picks:
+        t = p["Ticker"]
+        if t not in best_by_ticker or p["Rank_Key"] > best_by_ticker[t]["Rank_Key"]:
+            best_by_ticker[t] = p
+
+    # ---- Sort overall: signals > near-misses, then by rank key ----
+    ranked = sorted(best_by_ticker.values(),
+                    key=lambda x: x["Rank_Key"], reverse=True)
+    top = ranked[:top_n]
+
+    # Drop helper column before returning
+    for d in top:
+        d.pop("Rank_Key", None)
+
+    top_df = pd.DataFrame(top) if top else pd.DataFrame()
+    return {
+        "top_picks":            top_df,
+        "per_profile":          per_profile,
+        "combined_diagnostics": combined_diag,
+    }
+
+
 def run_scanner(
     config: dict,
     portfolio_df: Optional[pd.DataFrame] = None,
@@ -1150,11 +1231,23 @@ def run_scanner(
     # 5) Module 2 (gated by macro)
     t2 = time.time()
     _p(0.85, "Screening universe...")
+    best_of_all_result = None  # populated only in best_of_all mode
     if macro_ok:
-        scan_result = evaluate_new_signals(cfg, data_cache)
-        new_signals  = scan_result["signals"]
-        near_misses  = scan_result["near_misses"]
-        diagnostics  = scan_result["diagnostics"]
+        if cfg.get("best_of_all_mode", False):
+            # Run all 3 profiles and find Top 5 overall
+            _s("Best-of-All mode: evaluating breakout, pullback, and reversal profiles...")
+            best_of_all_result = evaluate_best_of_all_profiles(cfg, data_cache, top_n=5)
+            # For the main "new_signals" output, we still show the signals from
+            # the user's currently-selected profile (used by other tabs).
+            scan_result = evaluate_new_signals(cfg, data_cache)
+            new_signals  = scan_result["signals"]
+            near_misses  = scan_result["near_misses"]
+            diagnostics  = scan_result["diagnostics"]
+        else:
+            scan_result = evaluate_new_signals(cfg, data_cache)
+            new_signals  = scan_result["signals"]
+            near_misses  = scan_result["near_misses"]
+            diagnostics  = scan_result["diagnostics"]
     else:
         new_signals  = pd.DataFrame()
         near_misses  = pd.DataFrame()
@@ -1169,6 +1262,7 @@ def run_scanner(
     return {
         "new_signals":       new_signals,
         "near_misses":       near_misses,
+        "best_of_all":       best_of_all_result,
         "portfolio_updates": portfolio_updates,
         "diagnostics":       diagnostics,
         "macro":             macro_info,
