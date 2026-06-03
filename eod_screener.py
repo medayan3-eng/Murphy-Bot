@@ -101,6 +101,12 @@ DEFAULT_CONFIG = {
         "min_price":            2.0,        # $2 floor — no penny stocks
         "min_avg_volume":       500_000,    # 500K shares/day minimum
 
+        # 52-week uptrend pre-filter (OPTIONAL, off by default).
+        # When enabled, restricts the screener to stocks in a confirmed
+        # long-term uptrend (price > 200-SMA AND 52w return > min_gain%).
+        "uptrend_52w_enabled":  False,
+        "uptrend_52w_min_gain": 0.0,
+
         # NOTE: Beta filter intentionally removed from screener pipeline.
         # ATR-based filters (Keltner channels, volume surge, ATR stops) are
         # the TRUE technical volatility measures. Beta is an academic CAPM
@@ -872,8 +878,44 @@ def compute_beta(stock_df: pd.DataFrame,
 
 
 # ==============================================================================
-# LIQUIDITY & PRICE FLOOR  --  mandatory pre-filter
+# 52-WEEK UPTREND PRE-FILTER  --  optional, user-toggleable
 # ==============================================================================
+def check_52w_uptrend(df: pd.DataFrame, cfg: dict) -> bool:
+    """
+    Optional pre-filter (default OFF). Returns True only if the stock is in a
+    confirmed long-term uptrend over the past ~52 weeks (252 trading days).
+
+    Two conditions must both hold:
+      1. Today's close > SMA(200) — stock is above its long-term trend line.
+      2. Today's close > price 252 bars ago, by at least uptrend_52w_min_gain %.
+
+    When the filter is disabled in config, this always returns True so the
+    screener proceeds with no gating.
+    """
+    sc = cfg["screener"]
+    if not sc.get("uptrend_52w_enabled", False):
+        return True
+    if df is None or len(df) < 252:
+        # not enough history to confirm — reject conservatively
+        return False
+    close = df["Close"]
+    today = float(close.iloc[-1])
+
+    # Condition 1: above 200-SMA
+    sma200 = close.tail(200).mean()
+    if pd.isna(sma200) or today <= float(sma200):
+        return False
+
+    # Condition 2: positive 52-week return, optionally above a threshold
+    price_52w_ago = float(close.iloc[-252])
+    if price_52w_ago <= 0:
+        return False
+    yoy_pct = (today / price_52w_ago - 1.0) * 100.0
+    min_gain = sc.get("uptrend_52w_min_gain", 0.0)
+    return yoy_pct >= min_gain
+
+
+
 def check_liquidity(df: pd.DataFrame, cfg: dict) -> tuple[bool, float, float]:
     """
     Hard liquidity & price floor check. ALWAYS runs — cannot be disabled.
@@ -921,7 +963,7 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> dict:
     candidates = []   # ALL evaluated tickers with their score
 
     diag = {
-        "evaluated": 0, "sector_rs_ok": 0, "liquidity_ok": 0,
+        "evaluated": 0, "sector_rs_ok": 0, "liquidity_ok": 0, "uptrend_52w_ok": 0,
         "ma_alignment": 0, "obv_breakout": 0, "keltner_breakout": 0,
         "volume_surge": 0, "whipsaw_filter": 0, "divergence_ok": 0,
         "pullback_trigger": 0, "reversal_trigger": 0,
@@ -967,6 +1009,12 @@ def evaluate_new_signals(cfg: dict, data_cache: dict) -> dict:
         if not liq_ok:
             continue
         diag["liquidity_ok"] += 1
+
+        # 52-week uptrend pre-filter (OPTIONAL, default OFF).
+        # When enabled, rejects stocks not in a confirmed long-term uptrend.
+        if not check_52w_uptrend(df, cfg):
+            continue
+        diag["uptrend_52w_ok"] += 1
 
         # Beta computed for informational display only - NOT used for filtering.
         beta_val = compute_beta(df, spy_df, lookback=252)
