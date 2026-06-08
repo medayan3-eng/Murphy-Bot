@@ -21,14 +21,11 @@ import pandas as pd
 import streamlit as st
 
 from eod_screener import (
-    GICS_SECTORS,
     STRATEGY_PROFILES,
     apply_strategy_profile,
-    filter_universe_by_sectors,
     get_default_config,
     get_macro_snapshot,
     load_portfolio,
-    load_sector_map,
     load_universe,
     run_scanner,
 )
@@ -349,71 +346,6 @@ with st.sidebar:
         st.caption("✅ Only stocks above their 200-SMA AND with positive 52-week return will be scanned.")
     else:
         uptrend_min_gain = 0
-
-    # ---- Sector filter ------------------------------------------------------
-    # Lets the user restrict the scan to specific GICS sectors. Useful in
-    # geopolitical/regime shifts where some sectors lead and others lag.
-    st.markdown("---")
-    st.markdown("**🏭 Sector filter** *(optional)*")
-    sector_map_dict = load_sector_map(f"{UNIVERSE_DIR}/ticker_sectors.csv")
-
-    if not sector_map_dict:
-        st.caption("⚠️ Sector map file not found — sector filtering disabled.")
-        selected_sectors = []
-        include_unknown_sectors = True
-    else:
-        # Compute how many tickers in the current universe are in each sector
-        from collections import Counter
-        universe_sectors = Counter()
-        unknown_count = 0
-        for t in custom_universe:
-            sec = sector_map_dict.get(t.upper())
-            if sec and sec != "Unknown":
-                universe_sectors[sec] += 1
-            else:
-                unknown_count += 1
-
-        # Build option labels showing the count in current universe
-        sector_options = []
-        for sec in GICS_SECTORS:
-            n = universe_sectors.get(sec, 0)
-            if n > 0:
-                sector_options.append(f"{sec} ({n})")
-
-        selected_labels = st.multiselect(
-            "Select sectors (leave empty = all sectors)",
-            sector_options,
-            default=[],
-            help="Pick one or more sectors to focus on. Empty = scan ALL sectors. "
-                 "Useful in geopolitical events: e.g. select 'Energy' + 'Industrials' "
-                 "during war scares, or 'Technology' + 'Healthcare' for risk-on rallies.",
-        )
-        # Convert labels back to sector names (strip the count suffix)
-        selected_sectors = [s.rsplit(" (", 1)[0] for s in selected_labels]
-
-        if unknown_count > 0 and selected_sectors:
-            include_unknown_sectors = st.checkbox(
-                f"Also include {unknown_count} ticker(s) with unknown sector",
-                value=False,
-                help="Some tickers in our universe aren't yet classified into a sector. "
-                     "Check this box to include them alongside your selected sectors.",
-            )
-        else:
-            include_unknown_sectors = True
-
-        if selected_sectors:
-            # Apply the filter
-            before_n = len(custom_universe)
-            custom_universe = filter_universe_by_sectors(
-                custom_universe, selected_sectors, sector_map_dict,
-                include_unknown=include_unknown_sectors,
-            )
-            st.caption(
-                f"🎯 Filtered to **{len(custom_universe)}** tickers in "
-                f"{len(selected_sectors)} sector(s) (was {before_n})"
-            )
-        else:
-            st.caption(f"All {len(custom_universe)} tickers will be scanned across every sector.")
 
 
     # ---- Equity & risk ------------------------------------------------------
