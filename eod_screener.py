@@ -402,6 +402,62 @@ def load_universe(path: str) -> list[str]:
     return df[col].astype(str).str.upper().str.strip().tolist()
 
 
+# 11 GICS sectors (matching SPDR sector ETFs)
+GICS_SECTORS = [
+    "Technology",
+    "Healthcare",
+    "Financials",
+    "Consumer Discretionary",
+    "Communication Services",
+    "Industrials",
+    "Consumer Staples",
+    "Energy",
+    "Utilities",
+    "Real Estate",
+    "Materials",
+]
+
+
+def load_sector_map(path: str = "universes/ticker_sectors.csv") -> dict[str, str]:
+    """
+    Load ticker → sector mapping. Returns dict {TICKER: sector_name}.
+    Returns empty dict if file missing (graceful degradation).
+    """
+    if not os.path.exists(path):
+        return {}
+    df = pd.read_csv(path)
+    if "Ticker" not in df.columns or "Sector" not in df.columns:
+        return {}
+    return {row["Ticker"].upper().strip(): row["Sector"].strip()
+            for _, row in df.iterrows()
+            if isinstance(row["Ticker"], str) and isinstance(row["Sector"], str)}
+
+
+def filter_universe_by_sectors(
+    tickers: list[str],
+    selected_sectors: list[str],
+    sector_map: dict[str, str],
+    include_unknown: bool = False,
+) -> list[str]:
+    """
+    Filter `tickers` to only those in `selected_sectors`.
+    If `include_unknown` is True, tickers not in sector_map are also kept.
+    Empty `selected_sectors` => return all tickers unchanged (no filter).
+    """
+    if not selected_sectors:
+        return tickers
+    selected = set(selected_sectors)
+    out = []
+    for t in tickers:
+        sec = sector_map.get(t.upper())
+        if sec is None or sec == "Unknown":
+            if include_unknown:
+                out.append(t)
+        elif sec in selected:
+            out.append(t)
+    return out
+
+
 def load_portfolio(path_or_df) -> pd.DataFrame:
     """Load positions. Accepts a file path OR an already-loaded DataFrame."""
     if isinstance(path_or_df, pd.DataFrame):
