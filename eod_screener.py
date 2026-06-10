@@ -1,384 +1,165 @@
 """
 ================================================================================
- EOD STOCK SCREENER & PORTFOLIO MANAGEMENT  --  ENGINE
+EOD STOCK SCREENER — Murphy Methodology
 ================================================================================
- Importable module. The CONFIG dict at the top is the SINGLE source of defaults;
- the Streamlit UI and the CLI both pass a (possibly overridden) copy of this
- dict into run_scanner().
+Iron Filter (5 hard conditions) + Fibonacci Dashboard.
 
- Public API:
-     get_default_config()       -> dict
-     load_universe(path)        -> list[str]
-     load_portfolio(path)       -> DataFrame
-     run_scanner(config,
-                 portfolio_df=None,
-                 progress_cb=None,
-                 status_cb=None) -> dict with keys:
-         "new_signals"      : DataFrame
-         "portfolio_updates": DataFrame
-         "macro"            : dict
-         "macro_ok"         : bool
+PART A — Iron Filter (ALL conditions must pass):
+   1. Price ≥ $3  AND  20-day avg volume ≥ 750,000 shares
+   2. Sector outperforms SPY over last 50 days (relative strength > 1)
+   3. Current price > SMA50  AND  Current price > SMA200
+   4. Higher-High AND Higher-Low (Dow Theory uptrend, verified mathematically)
+   5. Pullback volume < Rising-wave volume (no panic / distribution)
 
- Dependencies:
-     pip install -r requirements.txt
+PART B — Fibonacci Dashboard (for passers only):
+   - Wave start (last swing low) → Wave end (last swing high)
+   - Fib retracements: 23.6%, 38.2%, 50.0%, 61.8%
+   - Current price and live retracement %
+
+Data: Yahoo Finance (free, via yfinance).
 ================================================================================
 """
-
 from __future__ import annotations
 
 import os
-import warnings
 from copy import deepcopy
 from datetime import datetime
 from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
-# Try the original pandas-ta first; fall back to pandas-ta-classic
-# (a maintained fork that supports modern Python/NumPy versions).
 try:
-    import pandas_ta as ta
+    import yfinance as yf
 except ImportError:
-    import pandas_ta_classic as ta
-
-warnings.filterwarnings("ignore")
+    yf = None
 
 
 # ==============================================================================
-# DEFAULT CONFIGURATION
+# DEFAULT CONFIG
 # ==============================================================================
 DEFAULT_CONFIG = {
-    # ----- Universe & I/O ---------------------------------------------------
-    "universe":        [],                   # list of tickers
-    "history_period":  "2y",
-    "total_equity":    100_000.0,
-    "min_bars":        250,                  # skip tickers without enough history
-
-    # ----- Module 1: Macro environment --------------------------------------
+    "min_price":            3.0,
+    "min_avg_volume":       750_000,
+    "sector_rs_lookback":   50,
+    "sma_fast":             50,
+    "sma_slow":             200,
+    "swing_window":         5,
+    "min_bars":             250,
     "macro": {
-        "enabled":              True,
-        "spy_ticker":           "SPY",
-        "spy_sma_length":       50,
-
-        "ad_line_sma_length":   20,
-        "ad_line_enabled":      False,       # disabled by default (no data source)
-
-        "vix_ticker":           "^VIX",
-        "vxv_ticker":           "^VIX3M",
-        "vix_ratio_threshold":  1.0,
-
-        "sector_sma_length":    10,
-        "sector_slope_lookback": 5,
-        "sector_check_enabled": True,
+        "enabled":           True,
+        "spy_ticker":        "SPY",
+        "spy_sma_length":    50,
+        "vix_enabled":       True,
+        "vix_ticker":        "^VIX",
+        "vix_threshold":     25.0,
+        "vxv_enabled":       True,
+        "vxv_ticker":        "^VIX3M",
+        "vxv_ratio_max":     1.0,
+        "sector_rs_enabled": True,
     },
-
-    # ----- Module 2: Screener ------------------------------------------------
-    "screener": {
-        "ma_lengths":           [20, 50, 200],    # set any item to None to skip
-        "ma_type":              "sma",            # "sma" or "ema"
-
-        "obv_lookback":         20,
-
-        "keltner_ema_length":   20,
-        "keltner_atr_length":   20,
-        "keltner_multiplier":   2.0,
-        "keltner_breakout_lookback": 5,   # accept breakouts in the last N bars
-
-        "volume_sma_length":    20,
-        "volume_multiplier":    1.5,
-
-        "whipsaw_pct":          0.01,
-
-        "divergence_enabled":   True,
-        "divergence_lookback":  20,
-        "rsi_length":           14,
-
-        # Liquidity & price floor — MANDATORY (cannot be disabled).
-        # Prevents the scanner from flagging illiquid penny stocks that
-        # look great on paper but can't be traded without massive slippage.
-        "min_price":            2.0,        # $2 floor — no penny stocks
-        "min_avg_volume":       500_000,    # 500K shares/day minimum
-
-        # 52-week uptrend pre-filter (OPTIONAL, off by default).
-        # When enabled, restricts the screener to stocks in a confirmed
-        # long-term uptrend (price > 200-SMA AND 52w return > min_gain%).
-        "uptrend_52w_enabled":  False,
-        "uptrend_52w_min_gain": 0.0,
-
-        # NOTE: Beta filter intentionally removed from screener pipeline.
-        # ATR-based filters (Keltner channels, volume surge, ATR stops) are
-        # the TRUE technical volatility measures. Beta is an academic CAPM
-        # statistic computed over 252 days — it filters out exactly the
-        # stocks we want: previously quiet names that JUST started a
-        # volatility breakout today. Beta is still computed and DISPLAYED
-        # in the output table for reference, but never used to gate signals.
-    },
-
-    # ----- Module 3: Risk Management ----------------------------------------
     "risk": {
-        "atr_length":           14,
-        "atr_stop_multiplier":  2.0,
-        "support_lookback":     10,
-
-        "target_method":        "atr",            # "atr" or "resistance"
-        "atr_target_multiplier": 6.0,
-        "resistance_lookback":  60,
-
-        "min_rr_ratio":         3.0,
-        "risk_per_trade_pct":   0.02,
-
-        "trailing_sma_length":  50,
+        "equity":              10000.0,
+        "risk_per_trade_pct":  0.02,
+        "atr_length":          14,
+        "atr_stop_multiplier": 2.0,
     },
-
-    # ----- Sector ETF map ---------------------------------------------------
-    "sector_map_default": "SPY",
-    "sector_map": {
-        # Tech
-        "AAPL":"XLK","MSFT":"XLK","NVDA":"XLK","AMD":"XLK","INTC":"XLK",
-        "ORCL":"XLK","CSCO":"XLK","ADBE":"XLK","CRM":"XLK","IBM":"XLK",
-        "QCOM":"XLK","TXN":"XLK","AVGO":"XLK","NOW":"XLK","INTU":"XLK",
-        # Communications
-        "GOOGL":"XLC","GOOG":"XLC","META":"XLC","NFLX":"XLC","DIS":"XLC",
-        "T":"XLC","VZ":"XLC","TMUS":"XLC","CMCSA":"XLC",
-        # Consumer Discretionary
-        "AMZN":"XLY","TSLA":"XLY","HD":"XLY","NKE":"XLY","MCD":"XLY",
-        "SBUX":"XLY","LOW":"XLY","TJX":"XLY","BKNG":"XLY",
-        # Financials
-        "JPM":"XLF","V":"XLF","MA":"XLF","BAC":"XLF","WFC":"XLF",
-        "GS":"XLF","MS":"XLF","C":"XLF","AXP":"XLF","BLK":"XLF",
-        "SCHW":"XLF","BRK-B":"XLF",
-        # Healthcare
-        "UNH":"XLV","LLY":"XLV","JNJ":"XLV","PFE":"XLV","ABBV":"XLV",
-        "MRK":"XLV","TMO":"XLV","ABT":"XLV","DHR":"XLV","BMY":"XLV",
-        # Energy
-        "XOM":"XLE","CVX":"XLE","COP":"XLE","SLB":"XLE","EOG":"XLE",
-        "OXY":"XLE","PSX":"XLE","MPC":"XLE",
-        # Industrials
-        "CAT":"XLI","BA":"XLI","HON":"XLI","UPS":"XLI","UNP":"XLI",
-        "DE":"XLI","RTX":"XLI","LMT":"XLI","GE":"XLI",
-        # Staples
-        "WMT":"XLP","COST":"XLP","PG":"XLP","KO":"XLP","PEP":"XLP",
-        "MO":"XLP","PM":"XLP","CL":"XLP",
-        # Utilities
-        "NEE":"XLU","DUK":"XLU","SO":"XLU","AEP":"XLU","D":"XLU","XEL":"XLU",
-        # Materials
-        "LIN":"XLB","APD":"XLB","SHW":"XLB","FCX":"XLB","NEM":"XLB",
-        # Real Estate
-        "AMT":"XLRE","PLD":"XLRE","CCI":"XLRE","EQIX":"XLRE","SPG":"XLRE",
-    },
+    "universe":         [],
+    "history_period":   "2y",
 }
 
 
 def get_default_config() -> dict:
-    """Return a deep copy of the default config so callers can mutate safely."""
     return deepcopy(DEFAULT_CONFIG)
 
 
 # ==============================================================================
-# STRATEGY PROFILES  --  Murphy-inspired presets
+# SECTOR ETF MAP
 # ==============================================================================
-# Each profile overrides Module 2 (screener) settings to match the strategy.
-# Macro module is left untouched so the user can decide which environment to filter.
-STRATEGY_PROFILES = {
-    "custom": {
-        "label": "🛠️ Custom (your sidebar settings)",
-        "description": "Use the toggles and sliders in the sidebar exactly as configured.",
-    },
-    "breakout": {
-        "label": "🚀 Profile 1: Pure Momentum Breakout",
-        "description": (
-            "Catches stocks exploding out of consolidation on heavy volume. "
-            "Ride the wave with institutional money. Murphy: in trends, MAs rule and "
-            "RSI is irrelevant (it stays overbought all the way up)."
-        ),
-        "screener": {
-            # MA alignment ON: 20 > 50 (trend)
-            "ma_alignment_enabled": True,
-            "ma_lengths":           [20, 50],
-            "ma_type":              "sma",
-            # Keltner breakout ON, tight multiplier
-            "keltner_enabled":           True,
-            "keltner_ema_length":        20,
-            "keltner_atr_length":        20,
-            "keltner_multiplier":        1.5,
-            "keltner_breakout_lookback": 5,
-            # Volume surge ON, aggressive
-            "volume_surge_enabled": True,
-            "volume_multiplier":    1.25,
-            "volume_sma_length":    20,
-            # OBV ON (smart money confirmation)
-            "obv_enabled":   True,
-            "obv_lookback":  20,
-            # RSI divergence OFF (Murphy: RSI is irrelevant in strong trends)
-            "divergence_enabled": False,
-            # Whipsaw filter ON (avoid false breakouts)
-            "whipsaw_enabled": True,
-            "whipsaw_pct":     0.01,
-            # Profile-specific triggers OFF
-            "pullback_enabled": False,
-            "reversal_enabled": False,
-        },
-        "risk": {
-            "atr_stop_multiplier": 2.0,  # wide stop for volatility
-            "min_rr_ratio":        3.0,
-        },
-    },
-    "pullback": {
-        "label": "📉 Profile 2: Pullback / Dip Buy in Uptrend",
-        "description": (
-            "Safer, conservative entry: buy a healthy stock that's resting on its "
-            "50-SMA support while RSI cools off. Murphy: markets move in waves — "
-            "buy the support, don't chase highs."
-        ),
-        "screener": {
-            # MA alignment uses only 50-SMA (price > 50 SMA, no 20/50/200 strict order)
-            "ma_alignment_enabled": False,  # we use the pullback trigger instead
-            "ma_lengths":           [50],
-            "ma_type":              "sma",
-            # Keltner OFF (we're not looking for a breakout)
-            "keltner_enabled": False,
-            # Volume surge OFF or very low (pullbacks have low volume)
-            "volume_surge_enabled": False,
-            "volume_multiplier":    1.0,
-            "volume_sma_length":    20,
-            # OBV optional
-            "obv_enabled":  False,
-            "obv_lookback": 20,
-            # RSI divergence OFF (we WANT RSI to be low)
-            "divergence_enabled": False,
-            # Whipsaw OFF (no breakout to filter)
-            "whipsaw_enabled": False,
-            # Pullback trigger ON
-            "pullback_enabled":        True,
-            "pullback_tolerance_pct":  0.03,   # within 3% of 50-SMA
-            "rsi_cooldown_lookback":   10,
-            "rsi_length":              14,
-            "reversal_enabled":        False,
-        },
-        "risk": {
-            "atr_stop_multiplier": 1.5,  # tighter stop below the 50-SMA
-            "min_rr_ratio":        3.0,
-        },
-    },
-    "reversal": {
-        "label": "🔄 Profile 3: Range Reversal / Oversold Bounce",
-        "description": (
-            "Stocks that crashed or chopped down to concrete-floor support, where "
-            "institutions are quietly accumulating. Murphy: in ranges, MAs are "
-            "useless (whipsaws) — RSI and volatility bands take over."
-        ),
-        "screener": {
-            # MA alignment OFF entirely (Murphy's rule for ranges)
-            "ma_alignment_enabled": False,
-            "ma_lengths":           [],
-            "ma_type":              "sma",
-            # Keltner is used INVERSELY via reversal trigger; the standard upper-band
-            # breakout check is OFF
-            "keltner_enabled":           False,
-            "keltner_ema_length":        20,
-            "keltner_atr_length":        20,
-            "keltner_multiplier":        2.0,
-            "keltner_breakout_lookback": 5,
-            # Volume surge ON (smart money accumulating at the bottom)
-            "volume_surge_enabled": True,
-            "volume_multiplier":    1.30,
-            "volume_sma_length":    20,
-            # OBV optional
-            "obv_enabled":  False,
-            "obv_lookback": 20,
-            # RSI divergence OFF (we want oversold cross, not divergence)
-            "divergence_enabled": False,
-            # Whipsaw OFF
-            "whipsaw_enabled": False,
-            # Reversal trigger ON
-            "pullback_enabled":  False,
-            "reversal_enabled":  True,
-            "reversal_lookback": 5,
-            "rsi_length":        14,
-        },
-        "risk": {
-            "atr_stop_multiplier": 1.0,  # tight stop below absolute low
-            "min_rr_ratio":        3.0,
-        },
-    },
+SECTOR_ETF_MAP = {
+    "Technology": "XLK", "Information Technology": "XLK",
+    "Healthcare": "XLV", "Health Care": "XLV",
+    "Financials": "XLF", "Financial Services": "XLF",
+    "Consumer Discretionary": "XLY", "Consumer Cyclical": "XLY",
+    "Communication Services": "XLC",
+    "Industrials": "XLI",
+    "Consumer Staples": "XLP", "Consumer Defensive": "XLP",
+    "Energy": "XLE",
+    "Utilities": "XLU",
+    "Real Estate": "XLRE",
+    "Materials": "XLB", "Basic Materials": "XLB",
 }
-
-
-def apply_strategy_profile(cfg: dict, profile_key: str) -> dict:
-    """Override cfg with a strategy profile's settings. 'custom' leaves cfg alone."""
-    if profile_key not in STRATEGY_PROFILES or profile_key == "custom":
-        return cfg
-    profile = STRATEGY_PROFILES[profile_key]
-    if "screener" in profile:
-        cfg["screener"].update(profile["screener"])
-    if "risk" in profile:
-        cfg["risk"].update(profile["risk"])
-    cfg["_active_profile"] = profile_key
-    return cfg
+ALL_SECTOR_ETFS = sorted(set(SECTOR_ETF_MAP.values()))
 
 
 # ==============================================================================
-# DATA FETCHING  --  batched for speed
+# UNIVERSE / PORTFOLIO LOADING
 # ==============================================================================
-def _flatten_yf(df: pd.DataFrame, ticker: Optional[str] = None) -> Optional[pd.DataFrame]:
-    """yfinance can return MultiIndex columns; normalize to OHLCV single-level."""
+def load_universe(path: str) -> list[str]:
+    df = pd.read_csv(path)
+    col = "Ticker" if "Ticker" in df.columns else df.columns[0]
+    return df[col].astype(str).str.upper().str.strip().tolist()
+
+
+def load_portfolio(path_or_df) -> pd.DataFrame:
+    if isinstance(path_or_df, pd.DataFrame):
+        df = path_or_df.copy()
+    elif isinstance(path_or_df, str):
+        if not os.path.exists(path_or_df):
+            return pd.DataFrame(columns=["Ticker", "Entry_Price", "Entry_Date"])
+        if path_or_df.lower().endswith((".xlsx", ".xls")):
+            df = pd.read_excel(path_or_df, engine="openpyxl")
+        else:
+            df = pd.read_csv(path_or_df)
+    else:
+        return pd.DataFrame(columns=["Ticker", "Entry_Price", "Entry_Date"])
+    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+    df["Entry_Price"] = pd.to_numeric(df["Entry_Price"], errors="coerce")
+    if "Entry_Date" in df.columns:
+        df["Entry_Date"] = pd.to_datetime(df["Entry_Date"], errors="coerce")
+    return df.dropna(subset=["Ticker", "Entry_Price"]).reset_index(drop=True)
+
+
+# ==============================================================================
+# DATA FETCHING
+# ==============================================================================
+def _flatten_yf_df(df) -> Optional[pd.DataFrame]:
     if df is None or df.empty:
         return None
     if isinstance(df.columns, pd.MultiIndex):
-        # MultiIndex: ('Open', 'AAPL'), etc. Slice to one ticker if specified.
-        if ticker and ticker in df.columns.get_level_values(1):
-            df = df.xs(ticker, axis=1, level=1)
-        else:
-            df.columns = df.columns.get_level_values(0)
-    df = df.rename(columns=str.title)
+        df = df.copy()
+        df.columns = df.columns.get_level_values(0)
     needed = ["Open", "High", "Low", "Close", "Volume"]
     if not all(c in df.columns for c in needed):
         return None
     return df[needed].dropna()
 
 
-def fetch_ohlcv(ticker: str, period: str = "2y") -> Optional[pd.DataFrame]:
-    """Single-ticker fetch. Returns None on failure."""
-    try:
-        df = yf.download(ticker, period=period, progress=False, auto_adjust=False)
-        return _flatten_yf(df, ticker)
-    except Exception:
-        return None
-
-
-def fetch_ohlcv_batch(
-    tickers: list[str],
-    period: str = "2y",
-    chunk_size: int = 50,
-    status_cb: Optional[Callable[[str], None]] = None,
-) -> dict[str, pd.DataFrame]:
-    """Batched download. ~5-10x faster than serial for large universes."""
-    out: dict[str, pd.DataFrame] = {}
-    tickers = list(dict.fromkeys(tickers))  # dedupe, preserve order
-
-    for i in range(0, len(tickers), chunk_size):
-        chunk = tickers[i:i + chunk_size]
+def fetch_ohlcv_batch(tickers: list[str], period: str = "2y",
+                      status_cb: Optional[Callable[[str], None]] = None) -> dict:
+    if yf is None:
+        raise ImportError("yfinance not installed")
+    out = {}
+    chunk_size = 50
+    for chunk_idx in range(0, len(tickers), chunk_size):
+        chunk = tickers[chunk_idx:chunk_idx + chunk_size]
         if status_cb:
-            status_cb(f"Downloading {i + len(chunk)}/{len(tickers)} tickers...")
+            status_cb(f"Downloading {chunk_idx+1}–{min(chunk_idx+chunk_size,len(tickers))} of {len(tickers)}…")
         try:
-            data = yf.download(
-                tickers=chunk, period=period, progress=False,
-                auto_adjust=False, group_by="ticker", threads=True,
-            )
+            data = yf.download(chunk, period=period, interval="1d",
+                               group_by="ticker", auto_adjust=True,
+                               progress=False, threads=True)
         except Exception:
             continue
-
         for t in chunk:
             try:
                 if len(chunk) == 1:
                     sub = data
-                else:
-                    if t not in data.columns.get_level_values(0):
-                        continue
+                elif isinstance(data.columns, pd.MultiIndex) and t in data.columns.levels[0]:
                     sub = data[t]
-                flat = _flatten_yf(sub, t)
+                else:
+                    continue
+                flat = _flatten_yf_df(sub)
                 if flat is not None and not flat.empty:
                     out[t] = flat
             except Exception:
@@ -386,944 +167,437 @@ def fetch_ohlcv_batch(
     return out
 
 
-def fetch_ad_line() -> Optional[pd.DataFrame]:
-    """
-    PLACEHOLDER -- yfinance has no native NYSE Advance-Decline line.
-    Plug in Stooq/Norgate/EODHD here and return DataFrame with 'Close' column
-    indexed by date. The breadth check soft-passes when this returns None.
-    """
-    return None
+# ==============================================================================
+# INDICATORS (only what's needed)
+# ==============================================================================
+def add_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    df = df.copy()
+    df["SMA_fast"] = df["Close"].rolling(cfg["sma_fast"]).mean()
+    df["SMA_slow"] = df["Close"].rolling(cfg["sma_slow"]).mean()
+    df["VOL_SMA"]  = df["Volume"].rolling(20).mean()
 
-
-def load_universe(path: str) -> list[str]:
-    """Load a CSV with a 'Ticker' column. Returns list of uppercase tickers."""
-    df = pd.read_csv(path)
-    col = "Ticker" if "Ticker" in df.columns else df.columns[0]
-    return df[col].astype(str).str.upper().str.strip().tolist()
-
-
-def load_portfolio(path_or_df) -> pd.DataFrame:
-    """Load positions. Accepts a file path OR an already-loaded DataFrame."""
-    if isinstance(path_or_df, pd.DataFrame):
-        df = path_or_df.copy()
-    elif isinstance(path_or_df, str):
-        if not os.path.exists(path_or_df):
-            return pd.DataFrame(columns=["Ticker", "Entry_Price", "Entry_Date"])
-        if path_or_df.lower().endswith((".xlsx", ".xls")):
-            df = pd.read_excel(path_or_df)
-        else:
-            df = pd.read_csv(path_or_df)
-    else:
-        return pd.DataFrame(columns=["Ticker", "Entry_Price", "Entry_Date"])
-
-    if df.empty:
-        return df
-    df["Ticker"]     = df["Ticker"].astype(str).str.upper().str.strip()
-    df["Entry_Date"] = pd.to_datetime(df["Entry_Date"])
-    df["Entry_Price"] = df["Entry_Price"].astype(float)
+    # ATR for trailing stops (portfolio module)
+    h_l  = df["High"] - df["Low"]
+    h_pc = (df["High"] - df["Close"].shift()).abs()
+    l_pc = (df["Low"]  - df["Close"].shift()).abs()
+    tr   = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+    df["ATR"] = tr.rolling(cfg["risk"]["atr_length"]).mean()
     return df
 
 
 # ==============================================================================
-# INDICATORS
+# MACRO KILL-SWITCH
 # ==============================================================================
-def _ma(series: pd.Series, length: int, kind: str = "sma") -> pd.Series:
-    return ta.ema(series, length=length) if kind == "ema" else ta.sma(series, length=length)
+def get_macro_snapshot(cfg: dict, data_cache: dict) -> tuple[bool, dict]:
+    info = {}
+    passed, total = 0, 0
+
+    spy = data_cache.get(cfg["macro"]["spy_ticker"])
+    if spy is not None and len(spy) >= cfg["macro"]["spy_sma_length"]:
+        c = float(spy["Close"].iloc[-1])
+        s = float(spy["Close"].rolling(cfg["macro"]["spy_sma_length"]).mean().iloc[-1])
+        ok = c > s
+        info["SPY"] = f"{c:.2f}"
+        info["SPY vs SMA50"] = "above ✅" if ok else "below ❌"
+        total += 1
+        if ok: passed += 1
+
+    if cfg["macro"]["vix_enabled"]:
+        vix = data_cache.get(cfg["macro"]["vix_ticker"])
+        if vix is not None and not vix.empty:
+            v = float(vix["Close"].iloc[-1])
+            ok = v < cfg["macro"]["vix_threshold"]
+            info["VIX"] = f"{v:.2f}"
+            info["VIX status"] = (
+                "calm 🟢" if v < 15 else "normal 🟢" if v < 20 else
+                "elevated 🟡" if v < 25 else "stressed 🟠" if v < 30 else "fear 🔴"
+            )
+            total += 1
+            if ok: passed += 1
+
+    if cfg["macro"]["vxv_enabled"]:
+        vix = data_cache.get(cfg["macro"]["vix_ticker"])
+        vxv = data_cache.get(cfg["macro"]["vxv_ticker"])
+        if vix is not None and vxv is not None and not vix.empty and not vxv.empty:
+            r = float(vix["Close"].iloc[-1]) / float(vxv["Close"].iloc[-1])
+            ok = r < cfg["macro"]["vxv_ratio_max"]
+            info["VIX/VXV ratio"] = f"{r:.2f}"
+            info["Term structure"] = "normal ✅" if ok else "stressed ❌"
+            total += 1
+            if ok: passed += 1
+
+    macro_ok = total == 0 or passed >= max(1, total - 1)
+    return macro_ok, info
 
 
-def add_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    out = df.copy()
-    sc, rk = cfg["screener"], cfg["risk"]
-
-    for L in sc["ma_lengths"]:
-        if L is not None:
-            out[f"MA_{L}"] = _ma(out["Close"], L, sc["ma_type"])
-
-    out["OBV"]      = ta.obv(out["Close"], out["Volume"])
-    out["EMA_K"]    = ta.ema(out["Close"], length=sc["keltner_ema_length"])
-    out["ATR_K"]    = ta.atr(out["High"], out["Low"], out["Close"], length=sc["keltner_atr_length"])
-    out["KC_UPPER"] = out["EMA_K"] + sc["keltner_multiplier"] * out["ATR_K"]
-    out["KC_LOWER"] = out["EMA_K"] - sc["keltner_multiplier"] * out["ATR_K"]
-    out["VOL_SMA"]  = ta.sma(out["Volume"], length=sc["volume_sma_length"])
-    out["RSI"]      = ta.rsi(out["Close"], length=sc["rsi_length"])
-    out["ATR_R"]    = ta.atr(out["High"], out["Low"], out["Close"], length=rk["atr_length"])
-    out["TREND_SMA"] = ta.sma(out["Close"], length=rk["trailing_sma_length"])
-    return out
+_TICKER_SECTOR_CACHE: dict[str, str] = {}
 
 
-# ==============================================================================
-# MODULE 1 -- MACRO / SECTOR ENVIRONMENT
-# ==============================================================================
-def check_market_trend(cfg: dict) -> tuple[bool, str]:
-    m = cfg["macro"]
-    if not m.get("spy_trend_enabled", True):
-        return True, "SPY trend check disabled"
-    spy = fetch_ohlcv(m["spy_ticker"], period="1y")
-    if spy is None:
-        return False, "SPY data unavailable"
-    spy["SMA"] = ta.sma(spy["Close"], length=m["spy_sma_length"])
-    last = spy.iloc[-1]
-    ok = bool(last["Close"] > last["SMA"])
-    return ok, f"SPY {last['Close']:.2f} {'>' if ok else '<='} SMA{m['spy_sma_length']} {last['SMA']:.2f}"
+def _resolve_sector_etf(ticker: str) -> Optional[str]:
+    """Lazily resolve sector via yfinance.info. Cached per process."""
+    if ticker in _TICKER_SECTOR_CACHE:
+        return SECTOR_ETF_MAP.get(_TICKER_SECTOR_CACHE[ticker])
+    if yf is None:
+        return None
+    try:
+        info = yf.Ticker(ticker).info
+        sec = info.get("sector")
+        if sec:
+            _TICKER_SECTOR_CACHE[ticker] = sec
+            return SECTOR_ETF_MAP.get(sec)
+    except Exception:
+        pass
+    return None
 
 
-def check_market_breadth(cfg: dict) -> tuple[bool, str]:
-    m = cfg["macro"]
-    if not m["ad_line_enabled"]:
-        return True, "AD line disabled"
-    ad = fetch_ad_line()
-    if ad is None or ad.empty:
-        return True, "AD line data not configured -- skipped"
-    ad["SMA"] = ta.sma(ad["Close"], length=m["ad_line_sma_length"])
-    last = ad.iloc[-1]
-    ok = bool(last["Close"] > last["SMA"])
-    return ok, f"AD {last['Close']:.2f} {'>' if ok else '<='} SMA{m['ad_line_sma_length']}"
+def check_sector_strength(ticker: str, cfg: dict, data_cache: dict) -> tuple[bool, dict]:
+    """Condition 2: sector outperforms SPY over the lookback window."""
+    if not cfg["macro"]["sector_rs_enabled"]:
+        return True, {"ratio": None, "sector_etf": None}
 
+    sector_etf = _resolve_sector_etf(ticker)
+    if sector_etf is None:
+        # Unknown sector → pass (don't gate on missing data)
+        return True, {"ratio": None, "sector_etf": None}
 
-def check_vix_term_structure(cfg: dict) -> tuple[bool, str]:
-    m = cfg["macro"]
-    vix = fetch_ohlcv(m["vix_ticker"], period="3mo")
-    vxv = fetch_ohlcv(m["vxv_ticker"], period="3mo")
-    if vix is None or vxv is None:
-        return False, "VIX/VXV data unavailable"
-    df = pd.concat([vix["Close"].rename("VIX"), vxv["Close"].rename("VXV")], axis=1).dropna()
-    if df.empty:
-        return False, "VIX/VXV merge empty"
-    ratio = df["VIX"].iloc[-1] / df["VXV"].iloc[-1]
-    ok = bool(ratio < m["vix_ratio_threshold"])
-    return ok, f"VIX/VXV={ratio:.3f} (<{m['vix_ratio_threshold']}: {ok})"
+    sec_df = data_cache.get(sector_etf)
+    spy_df = data_cache.get(cfg["macro"]["spy_ticker"])
+    lb = cfg["sector_rs_lookback"]
+    if sec_df is None or spy_df is None or len(sec_df) < lb+1 or len(spy_df) < lb+1:
+        return True, {"ratio": None, "sector_etf": sector_etf}
 
-
-def check_sector_strength(ticker: str, cfg: dict, data_cache: dict) -> tuple[bool, str]:
-    """Per-ticker. Uses cached sector ETF & SPY data."""
-    m = cfg["macro"]
-    if not m["sector_check_enabled"]:
-        return True, "sector check disabled"
-    sector_etf = cfg["sector_map"].get(ticker.upper(), cfg["sector_map_default"])
-    if sector_etf == m["spy_ticker"]:
-        return True, "no sector mapping -- skipped"
-
-    sec = data_cache.get(sector_etf)
-    if sec is None:
-        sec = fetch_ohlcv(sector_etf, period="6mo")
-    spy = data_cache.get(m["spy_ticker"])
-    if spy is None:
-        spy = fetch_ohlcv(m["spy_ticker"], period="6mo")
-    if sec is None or spy is None:
-        return False, "sector/SPY unavailable"
-
-    ratio = (sec["Close"] / spy["Close"]).dropna()
-    sma = ta.sma(ratio, length=m["sector_sma_length"]).dropna()
-    if len(sma) < m["sector_slope_lookback"] + 1:
-        return False, "sector SMA too short"
-    slope = sma.iloc[-1] - sma.iloc[-1 - m["sector_slope_lookback"]]
-    return bool(slope > 0), f"{sector_etf}/SPY slope={slope:+.4f}"
-
-
-def macro_kill_switch(cfg: dict) -> tuple[bool, dict]:
-    if not cfg["macro"]["enabled"]:
-        return True, {"status": "disabled"}
-    trend_ok, t_msg   = check_market_trend(cfg)
-    breadth_ok, b_msg = check_market_breadth(cfg)
-    vix_ok, v_msg     = check_vix_term_structure(cfg)
-    overall = trend_ok and breadth_ok and vix_ok
-    return overall, {
-        "market_trend":   t_msg,
-        "market_breadth": b_msg,
-        "vix_term":       v_msg,
-        "overall":        "PASS" if overall else "FAIL",
+    sec_ret = sec_df["Close"].iloc[-1] / sec_df["Close"].iloc[-lb-1] - 1.0
+    spy_ret = spy_df["Close"].iloc[-1] / spy_df["Close"].iloc[-lb-1] - 1.0
+    ratio = (1.0 + sec_ret) / (1.0 + spy_ret)
+    return ratio > 1.0, {
+        "ratio": float(ratio),
+        "sector_etf": sector_etf,
+        "sector_ret_pct": float(sec_ret * 100),
+        "spy_ret_pct":    float(spy_ret * 100),
     }
 
 
-def get_macro_snapshot(cfg: dict) -> dict:
-    """
-    Return numeric macro values for UI display (not just pass/fail strings).
-    This is what the Streamlit app calls to show the "Market State" panel.
-    """
-    snap = {
-        "spy_price": None, "spy_sma": None, "spy_ok": None,
-        "vix": None, "vxv": None, "vix_ratio": None, "vix_ok": None,
-        "vix_threshold": cfg["macro"]["vix_ratio_threshold"],
-        "spy_sma_len":   cfg["macro"]["spy_sma_length"],
-    }
-    m = cfg["macro"]
-
-    spy = fetch_ohlcv(m["spy_ticker"], period="1y")
-    if spy is not None and not spy.empty:
-        spy["SMA"] = ta.sma(spy["Close"], length=m["spy_sma_length"])
-        last = spy.iloc[-1]
-        snap["spy_price"] = float(last["Close"])
-        snap["spy_sma"]   = float(last["SMA"]) if not pd.isna(last["SMA"]) else None
-        if snap["spy_sma"]:
-            snap["spy_ok"] = snap["spy_price"] > snap["spy_sma"]
-
-    vix = fetch_ohlcv(m["vix_ticker"], period="3mo")
-    vxv = fetch_ohlcv(m["vxv_ticker"], period="3mo")
-    if vix is not None and vxv is not None:
-        df = pd.concat([vix["Close"].rename("VIX"),
-                        vxv["Close"].rename("VXV")], axis=1).dropna()
-        if not df.empty:
-            snap["vix"] = float(df["VIX"].iloc[-1])
-            snap["vxv"] = float(df["VXV"].iloc[-1])
-            snap["vix_ratio"] = snap["vix"] / snap["vxv"]
-            snap["vix_ok"] = snap["vix_ratio"] < m["vix_ratio_threshold"]
-
-    snap["overall_ok"] = bool(snap.get("spy_ok") and snap.get("vix_ok"))
-    return snap
-
-
 # ==============================================================================
-# MODULE 2 -- SCREENER
+# IRON FILTER CHECKS
 # ==============================================================================
-def check_ma_alignment(df: pd.DataFrame, cfg: dict) -> bool:
-    if not cfg["screener"].get("ma_alignment_enabled", True):
-        return True
-    lengths = [L for L in cfg["screener"]["ma_lengths"] if L is not None]
-    if not lengths:
-        return True
-    row = df.iloc[-1]
-    vals = [row["Close"]] + [row.get(f"MA_{L}") for L in lengths]
-    if any(pd.isna(v) for v in vals):
-        return False
-    return all(vals[i] > vals[i + 1] for i in range(len(vals) - 1))
-
-
-def check_obv_breakout(df: pd.DataFrame, cfg: dict) -> bool:
-    if not cfg["screener"].get("obv_enabled", True):
-        return True
-    lb = cfg["screener"]["obv_lookback"]
-    if len(df) < lb + 1:
-        return False
-    obv = df["OBV"]
-    return bool(obv.iloc[-1] >= obv.iloc[-lb - 1:-1].max())
-
-
-def check_keltner_breakout(df: pd.DataFrame, cfg: dict) -> bool:
-    """
-    Detect a recent Keltner upper-band breakout.
-    Default: the close must currently be above the upper band, AND a fresh
-    cross from below must have occurred within the last `breakout_lookback`
-    bars (default 5). This is looser than "must cross today" so the screener
-    catches stocks that broke out recently and are still above the band.
-    """
-    if not cfg["screener"].get("keltner_enabled", True):
-        return True
-    lb = cfg["screener"].get("keltner_breakout_lookback", 5)
-    if len(df) < lb + 2:
-        return False
-    if pd.isna(df["KC_UPPER"].iloc[-1]) or df["Close"].iloc[-1] <= df["KC_UPPER"].iloc[-1]:
-        return False
-    # Find a cross from <= to > within the last lb bars
-    window = df.iloc[-lb - 1:]
-    for i in range(1, len(window)):
-        prev_c, prev_u = window["Close"].iloc[i - 1], window["KC_UPPER"].iloc[i - 1]
-        curr_c, curr_u = window["Close"].iloc[i],     window["KC_UPPER"].iloc[i]
-        if pd.isna(prev_u) or pd.isna(curr_u):
-            continue
-        if prev_c <= prev_u and curr_c > curr_u:
-            return True
-    return False
-
-
-def check_volume_surge(df: pd.DataFrame, cfg: dict) -> bool:
-    if not cfg["screener"].get("volume_surge_enabled", True):
-        return True
-    row = df.iloc[-1]
-    if pd.isna(row["VOL_SMA"]) or row["VOL_SMA"] == 0:
-        return False
-    return bool(row["Volume"] > cfg["screener"]["volume_multiplier"] * row["VOL_SMA"])
-
-
-def check_whipsaw_filter(df: pd.DataFrame, cfg: dict) -> bool:
-    if not cfg["screener"].get("whipsaw_enabled", True):
-        return True
-    row = df.iloc[-1]
-    if pd.isna(row["KC_UPPER"]):
-        return False
-    return bool(row["Close"] >= row["KC_UPPER"] * (1 + cfg["screener"]["whipsaw_pct"]))
-
-
-def check_divergence_blocker(df: pd.DataFrame, cfg: dict) -> bool:
-    """Return True if PASSES (no bearish divergence)."""
-    sc = cfg["screener"]
-    if not sc["divergence_enabled"]:
-        return True
-    lb = sc["divergence_lookback"]
-    if len(df) < lb * 2:
-        return True
-
-    curr_close = df["Close"].iloc[-1]
-    if curr_close < df["Close"].iloc[-lb:].max():
-        return True  # not at a new high -> blocker inactive
-
-    prev_window = df.iloc[-2 * lb:-lb]
-    if prev_window.empty:
-        return True
-    prev_peak_idx = prev_window["Close"].idxmax()
-    prev_peak_rsi = prev_window.loc[prev_peak_idx, "RSI"]
-    curr_rsi = df["RSI"].iloc[-1]
-    if pd.isna(prev_peak_rsi) or pd.isna(curr_rsi):
-        return True
-    return not (curr_rsi < prev_peak_rsi)
-
-
-def screen_stock(df: pd.DataFrame, cfg: dict) -> tuple[bool, dict]:
-    checks = {
-        "ma_alignment":     check_ma_alignment(df, cfg),
-        "obv_breakout":     check_obv_breakout(df, cfg),
-        "keltner_breakout": check_keltner_breakout(df, cfg),
-        "volume_surge":     check_volume_surge(df, cfg),
-        "whipsaw_filter":   check_whipsaw_filter(df, cfg),
-        "divergence_ok":    check_divergence_blocker(df, cfg),
-        "pullback_trigger": check_pullback_trigger(df, cfg),
-        "reversal_trigger": check_reversal_trigger(df, cfg),
-    }
-    return all(checks.values()), checks
-
-
-# ==============================================================================
-# PROFILE-SPECIFIC TRIGGERS  (Pullback, Reversal)
-# ==============================================================================
-def check_pullback_trigger(df: pd.DataFrame, cfg: dict) -> bool:
-    """
-    Pullback in uptrend trigger (Murphy's classic dip-buy):
-      - Price must be near (within `pullback_tolerance_pct`) the 50-SMA.
-      - Price is above the 50-SMA (uptrend still intact).
-      - RSI dipped below 50 in the last `rsi_cooldown_lookback` bars AND is now
-        turning back up (today's RSI > yesterday's RSI).
-    """
-    sc = cfg["screener"]
-    if not sc.get("pullback_enabled", False):
-        return True
-    if len(df) < 60:
-        return False
-
-    # Need a 50-SMA column
-    sma50_col = "MA_50"
-    if sma50_col not in df.columns or pd.isna(df[sma50_col].iloc[-1]):
-        return False
-
-    last = df.iloc[-1]
-    sma50 = float(last[sma50_col])
-    price = float(last["Close"])
-
-    # Uptrend intact
-    if price <= sma50:
-        return False
-
-    # Near the SMA50 (within tolerance %)
-    tol = sc.get("pullback_tolerance_pct", 0.03)
-    if (price - sma50) / sma50 > tol:
-        return False
-
-    # RSI cooled and now turning up
-    lb = sc.get("rsi_cooldown_lookback", 10)
-    rsi = df["RSI"].iloc[-lb:]
-    if pd.isna(rsi.iloc[-1]) or pd.isna(rsi.iloc[-2]):
-        return False
-    if rsi.min() >= 50:
-        return False  # never cooled
-    if rsi.iloc[-1] <= rsi.iloc[-2]:
-        return False  # not turning up
-    return True
-
-
-def check_reversal_trigger(df: pd.DataFrame, cfg: dict) -> bool:
-    """
-    Range / oversold reversal trigger (Linda Raschke / Murphy oscillator setup):
-      - Within the last `reversal_lookback` bars, the LOW dipped below the
-        lower Keltner band (extreme oversold).
-      - Today the close is back inside the Keltner channel (above lower band).
-      - RSI is currently above 30 and was below 30 within the lookback
-        (oversold cross from below).
-    """
-    sc = cfg["screener"]
-    if not sc.get("reversal_enabled", False):
-        return True
-    if len(df) < 30:
-        return False
-    if "KC_LOWER" not in df.columns:
-        return False
-
-    lb = sc.get("reversal_lookback", 5)
-    window = df.iloc[-lb - 1:]
-    last = df.iloc[-1]
-
-    # Back inside channel today
-    if pd.isna(last["KC_LOWER"]) or last["Close"] <= last["KC_LOWER"]:
-        return False
-
-    # At some point in the window, the LOW pierced the lower band
-    pierced = (window["Low"] < window["KC_LOWER"]).any()
-    if not pierced:
-        return False
-
-    # RSI: was oversold, now recovered
-    rsi_window = df["RSI"].iloc[-lb - 1:]
-    if pd.isna(last["RSI"]) or last["RSI"] <= 30:
-        return False
-    if (rsi_window < 30).sum() == 0:
-        return False
-    return True
-
-
-# ==============================================================================
-# MODULE 3 -- RISK & PORTFOLIO
-# ==============================================================================
-def find_local_support(df: pd.DataFrame, lookback: int) -> float:
-    return float(df["Low"].iloc[-lookback:].min())
-
-
-def calculate_initial_stop(df: pd.DataFrame, cfg: dict) -> float:
-    rk = cfg["risk"]
-    support = find_local_support(df, rk["support_lookback"])
-    atr = float(df["ATR_R"].iloc[-1])
-    return support - rk["atr_stop_multiplier"] * atr
-
-
-def calculate_target(df: pd.DataFrame, entry: float, cfg: dict) -> float:
-    rk = cfg["risk"]
-    if rk["target_method"] == "atr":
-        atr = float(df["ATR_R"].iloc[-1])
-        return entry + rk["atr_target_multiplier"] * atr
-    hi = df["High"].iloc[-rk["resistance_lookback"]:-1].max()
-    return float(hi) if not pd.isna(hi) else entry
-
-
-def check_rr_ratio(entry: float, stop: float, target: float, cfg: dict) -> tuple[bool, float]:
-    risk_amt = entry - stop
-    if risk_amt <= 0:
-        return False, 0.0
-    rr = (target - entry) / risk_amt
-    return rr >= cfg["risk"]["min_rr_ratio"], rr
-
-
-def calculate_position_size(entry: float, stop: float, cfg: dict) -> int:
-    per_share_risk = entry - stop
-    if per_share_risk <= 0:
-        return 0
-    dollar_risk = cfg["total_equity"] * cfg["risk"]["risk_per_trade_pct"]
-    return int(dollar_risk // per_share_risk)
-
-
-def calculate_trailing_stop(df: pd.DataFrame, entry_date, prior_stop, cfg: dict) -> float:
-    rk = cfg["risk"]
-    entry_date = pd.to_datetime(entry_date)
-    in_trade = df[df.index >= entry_date]
-    if in_trade.empty:
-        in_trade = df.tail(rk["support_lookback"])
-
-    swing_low = float(in_trade["Low"].iloc[-rk["support_lookback"]:].min())
-    trend_sma = df["TREND_SMA"].iloc[-1]
-    if pd.isna(trend_sma):
-        trend_sma = swing_low
-    floor = max(swing_low, float(trend_sma))
-    atr = float(df["ATR_R"].iloc[-1])
-    raw = floor - rk["atr_stop_multiplier"] * atr
-
-    if prior_stop is None or pd.isna(prior_stop):
-        return raw
-    return max(raw, float(prior_stop))
-
-
-def check_volume_exit(df: pd.DataFrame, trailing_stop: float) -> bool:
-    row = df.iloc[-1]
-    if pd.isna(row["VOL_SMA"]):
-        return False
-    return bool(row["Close"] < trailing_stop and row["Volume"] > row["VOL_SMA"])
-
-
-# ==============================================================================
-# BETA  --  computed for INFORMATIONAL DISPLAY ONLY (not a filter)
-# ==============================================================================
-def compute_beta(stock_df: pd.DataFrame,
-                 spy_df: Optional[pd.DataFrame],
-                 lookback: int = 252) -> Optional[float]:
-    """
-    Compute stock beta vs SPY using daily returns over `lookback` bars.
-    beta = Cov(stock_ret, spy_ret) / Var(spy_ret).
-
-    NOTE: This value is shown in the output table for reference but is
-    NOT used to filter signals. Beta is an academic CAPM statistic and
-    conflicts with the ATR/Keltner-based technical analysis the scanner
-    actually relies on. A previously low-beta stock that JUST started a
-    volatility breakout is exactly the kind of setup we want to catch,
-    and a beta filter would reject it.
-
-    Returns None if either series is too short or variance is zero.
-    """
-    if stock_df is None or spy_df is None or stock_df.empty or spy_df.empty:
-        return None
-    common_idx = stock_df.index.intersection(spy_df.index)
-    if len(common_idx) < 30:
-        return None
-    stock = stock_df.loc[common_idx, "Close"].iloc[-lookback:]
-    spy   = spy_df.loc[common_idx,   "Close"].iloc[-lookback:]
-    if len(stock) < 30:
-        return None
-    stock_ret = stock.pct_change().dropna()
-    spy_ret   = spy.pct_change().dropna()
-    common = stock_ret.index.intersection(spy_ret.index)
-    if len(common) < 30:
-        return None
-    stock_ret = stock_ret.loc[common]
-    spy_ret   = spy_ret.loc[common]
-    spy_var = spy_ret.var()
-    if spy_var == 0 or pd.isna(spy_var):
-        return None
-    cov = stock_ret.cov(spy_ret)
-    if pd.isna(cov):
-        return None
-    return float(cov / spy_var)
-
-
-# ==============================================================================
-# 52-WEEK UPTREND PRE-FILTER  --  optional, user-toggleable
-# ==============================================================================
-def check_52w_uptrend(df: pd.DataFrame, cfg: dict) -> bool:
-    """
-    Optional pre-filter (default OFF). Returns True only if the stock is in a
-    confirmed long-term uptrend over the past ~52 weeks (252 trading days).
-
-    Two conditions must both hold:
-      1. Today's close > SMA(200) — stock is above its long-term trend line.
-      2. Today's close > price 252 bars ago, by at least uptrend_52w_min_gain %.
-
-    When the filter is disabled in config, this always returns True so the
-    screener proceeds with no gating.
-    """
-    sc = cfg["screener"]
-    if not sc.get("uptrend_52w_enabled", False):
-        return True
-    if df is None or len(df) < 252:
-        # not enough history to confirm — reject conservatively
-        return False
-    close = df["Close"]
-    today = float(close.iloc[-1])
-
-    # Condition 1: above 200-SMA
-    sma200 = close.tail(200).mean()
-    if pd.isna(sma200) or today <= float(sma200):
-        return False
-
-    # Condition 2: positive 52-week return, optionally above a threshold
-    price_52w_ago = float(close.iloc[-252])
-    if price_52w_ago <= 0:
-        return False
-    yoy_pct = (today / price_52w_ago - 1.0) * 100.0
-    min_gain = sc.get("uptrend_52w_min_gain", 0.0)
-    return yoy_pct >= min_gain
-
-
-
-def check_liquidity(df: pd.DataFrame, cfg: dict) -> tuple[bool, float, float]:
-    """
-    Hard liquidity & price floor check. ALWAYS runs — cannot be disabled.
-
-    Rejects:
-      - Penny stocks (price < min_price) — too easy to manipulate, huge spreads
-      - Illiquid names (avg vol < min_avg_volume) — slippage destroys edge
-
-    Returns (passes, current_price, avg_volume).
-    """
-    sc = cfg["screener"]
-    min_price = sc.get("min_price", 2.0)
-    min_volume = sc.get("min_avg_volume", 500_000)
-
+def check_liquidity_and_price(df: pd.DataFrame, cfg: dict) -> tuple[bool, float, float]:
     price = float(df["Close"].iloc[-1])
-    # 20-day average volume (or whatever VOL_SMA was configured to)
-    if "VOL_SMA" in df.columns and not pd.isna(df["VOL_SMA"].iloc[-1]):
-        avg_vol = float(df["VOL_SMA"].iloc[-1])
-    else:
-        avg_vol = float(df["Volume"].tail(20).mean())
-
+    avg_vol = (float(df["VOL_SMA"].iloc[-1]) if "VOL_SMA" in df.columns and
+               not pd.isna(df["VOL_SMA"].iloc[-1]) else float(df["Volume"].tail(20).mean()))
     if pd.isna(price) or pd.isna(avg_vol):
         return False, price, avg_vol
-    if price < min_price:
-        return False, price, avg_vol
-    if avg_vol < min_volume:
+    if price < cfg["min_price"] or avg_vol < cfg["min_avg_volume"]:
         return False, price, avg_vol
     return True, price, avg_vol
 
 
-# ==============================================================================
-# ORCHESTRATION
-# ==============================================================================
-def evaluate_new_signals(cfg: dict, data_cache: dict) -> dict:
-    """
-    Returns a dict:
-        "signals":      DataFrame of full passes (ready to trade)
-        "near_misses":  DataFrame of top-10 closest non-passers, with score
-        "diagnostics":  funnel counts (how many passed each step)
-        "all_candidates": every evaluated ticker (for advanced debugging)
-    """
-    spy_df = data_cache.get(cfg["macro"]["spy_ticker"])
+def check_ma_position(df: pd.DataFrame) -> bool:
+    close = df["Close"].iloc[-1]
+    sma_fast = df["SMA_fast"].iloc[-1]
+    sma_slow = df["SMA_slow"].iloc[-1]
+    if pd.isna(sma_fast) or pd.isna(sma_slow):
+        return False
+    return close > sma_fast and close > sma_slow
 
-    signals = []
-    candidates = []   # ALL evaluated tickers with their score
 
+def find_swing_highs_lows(df: pd.DataFrame, window: int = 5) -> tuple[list[int], list[int]]:
+    """Confirmed pivots only (the last `window` bars are excluded)."""
+    highs = df["High"].values
+    lows  = df["Low"].values
+    n = len(df)
+    swing_highs, swing_lows = [], []
+    for i in range(window, n - window):
+        win_h = highs[i - window:i + window + 1]
+        win_l = lows[i - window:i + window + 1]
+        if highs[i] == win_h.max():
+            if not swing_highs or i - swing_highs[-1] >= window:
+                swing_highs.append(i)
+        if lows[i] == win_l.min():
+            if not swing_lows or i - swing_lows[-1] >= window:
+                swing_lows.append(i)
+    return swing_highs, swing_lows
+
+
+def check_hh_hl_structure(df: pd.DataFrame, cfg: dict) -> tuple[bool, Optional[dict]]:
+    swing_highs, swing_lows = find_swing_highs_lows(df, cfg["swing_window"])
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return False, None
+    h_curr_i, h_prev_i = swing_highs[-1], swing_highs[-2]
+    l_curr_i, l_prev_i = swing_lows[-1],  swing_lows[-2]
+    h_curr = float(df["High"].iloc[h_curr_i])
+    h_prev = float(df["High"].iloc[h_prev_i])
+    l_curr = float(df["Low"].iloc[l_curr_i])
+    l_prev = float(df["Low"].iloc[l_prev_i])
+    if not (h_curr > h_prev and l_curr > l_prev):
+        return False, None
+    # Wave must be: low → high in order
+    if l_curr_i >= h_curr_i:
+        return False, None
+    return True, {
+        "h_curr_idx": h_curr_i, "h_prev_idx": h_prev_i,
+        "l_curr_idx": l_curr_i, "l_prev_idx": l_prev_i,
+        "h_curr": h_curr, "h_prev": h_prev,
+        "l_curr": l_curr, "l_prev": l_prev,
+    }
+
+
+def check_pullback_volume(df: pd.DataFrame, swing_info: dict) -> tuple[bool, Optional[float]]:
+    l_i, h_i = swing_info["l_curr_idx"], swing_info["h_curr_idx"]
+    n = len(df)
+    if h_i >= n - 1:
+        return False, None
+    rising   = df["Volume"].iloc[l_i:h_i + 1]
+    pullback = df["Volume"].iloc[h_i + 1:n]
+    if len(rising) < 2 or len(pullback) < 1:
+        return False, None
+    r_avg = float(rising.mean()); p_avg = float(pullback.mean())
+    if r_avg == 0 or pd.isna(r_avg) or pd.isna(p_avg):
+        return False, None
+    ratio = p_avg / r_avg
+    return ratio < 1.0, ratio
+
+
+def calculate_fibonacci_levels(df: pd.DataFrame, swing_info: dict) -> dict:
+    l_i, h_i = swing_info["l_curr_idx"], swing_info["h_curr_idx"]
+    wave_low  = float(df["Low"].iloc[l_i])
+    wave_high = float(df["High"].iloc[h_i])
+    wave_size = wave_high - wave_low
+    current   = float(df["Close"].iloc[-1])
+    if wave_size > 0:
+        current_retrace = (wave_high - current) / wave_size * 100
+        wave_size_pct   = wave_size / wave_low * 100 if wave_low > 0 else 0
+    else:
+        current_retrace = 0.0
+        wave_size_pct   = 0.0
+    return {
+        "wave_low":              wave_low,
+        "wave_high":             wave_high,
+        "wave_low_date":         df.index[l_i],
+        "wave_high_date":        df.index[h_i],
+        "wave_size_pct":         wave_size_pct,
+        "fib_23_6":              wave_high - 0.236 * wave_size,
+        "fib_38_2":              wave_high - 0.382 * wave_size,
+        "fib_50_0":              wave_high - 0.500 * wave_size,
+        "fib_61_8":              wave_high - 0.618 * wave_size,
+        "current_price":         current,
+        "current_retracement_pct": current_retrace,
+        "days_since_high":       len(df) - 1 - h_i,
+    }
+
+
+def check_iron_filter(ticker: str, df: pd.DataFrame, cfg: dict,
+                      data_cache: dict) -> tuple[bool, dict]:
+    """Run all 5 conditions. Returns (all_passed, details)."""
+    details = {"ticker": ticker, "reasons_failed": []}
+
+    ok, price, avg_vol = check_liquidity_and_price(df, cfg)
+    details["price"] = price; details["avg_vol"] = avg_vol
+    if not ok:
+        details["reasons_failed"].append("Price/Volume floor")
+        return False, details
+    details["passed_1"] = True
+
+    if cfg["macro"]["sector_rs_enabled"]:
+        ok, si = check_sector_strength(ticker, cfg, data_cache)
+        details["sector_etf"]   = si.get("sector_etf")
+        details["sector_ratio"] = si.get("ratio")
+        if not ok:
+            details["reasons_failed"].append("Sector RS ≤ SPY")
+            return False, details
+    details["passed_2"] = True
+
+    if not check_ma_position(df):
+        details["reasons_failed"].append("Price ≤ SMA50 or SMA200")
+        return False, details
+    details["passed_3"] = True
+
+    ok, swing = check_hh_hl_structure(df, cfg)
+    if not ok:
+        details["reasons_failed"].append("No HH/HL structure")
+        return False, details
+    details["passed_4"] = True
+    details["swing_info"] = swing
+
+    ok, vol_ratio = check_pullback_volume(df, swing)
+    details["vol_ratio"] = vol_ratio
+    if not ok:
+        details["reasons_failed"].append("Pullback vol ≥ rising vol")
+        return False, details
+    details["passed_5"] = True
+
+    details["fib"] = calculate_fibonacci_levels(df, swing)
+    return True, details
+
+
+# ==============================================================================
+# ORCHESTRATOR
+# ==============================================================================
+def evaluate_iron_filter_universe(cfg: dict, data_cache: dict) -> dict:
+    rows = []
     diag = {
-        "evaluated": 0, "sector_rs_ok": 0, "liquidity_ok": 0, "uptrend_52w_ok": 0,
-        "ma_alignment": 0, "obv_breakout": 0, "keltner_breakout": 0,
-        "volume_surge": 0, "whipsaw_filter": 0, "divergence_ok": 0,
-        "pullback_trigger": 0, "reversal_trigger": 0,
-        "all_filters_ok": 0, "valid_stop": 0, "rr_ok": 0, "final": 0,
+        "evaluated": 0, "passed_liquidity": 0, "passed_sector_rs": 0,
+        "passed_ma": 0, "passed_hh_hl": 0, "passed_vol_conf": 0, "final": 0,
     }
-
-    # Friendly Hebrew/English filter names for display
-    filter_labels = {
-        "ma_alignment":     "MA alignment",
-        "obv_breakout":     "OBV breakout",
-        "keltner_breakout": "Keltner breakout",
-        "volume_surge":     "Volume surge",
-        "whipsaw_filter":   "Whipsaw filter",
-        "divergence_ok":    "No RSI divergence",
-        "pullback_trigger": "Pullback trigger",
-        "reversal_trigger": "Reversal trigger",
-    }
-
-    sc = cfg["screener"]
-    # Which filters are currently enabled (used for scoring)
-    enabled_map = {
-        "ma_alignment":     sc.get("ma_alignment_enabled", True),
-        "obv_breakout":     sc.get("obv_enabled", True),
-        "keltner_breakout": sc.get("keltner_enabled", True),
-        "volume_surge":     sc.get("volume_surge_enabled", True),
-        "whipsaw_filter":   sc.get("whipsaw_enabled", True),
-        "divergence_ok":    sc.get("divergence_enabled", True),
-        "pullback_trigger": sc.get("pullback_enabled", False),
-        "reversal_trigger": sc.get("reversal_enabled", False),
-    }
-    enabled_filters = [k for k, v in enabled_map.items() if v]
-
     for ticker in cfg["universe"]:
         df = data_cache.get(ticker)
         if df is None or len(df) < cfg["min_bars"]:
             continue
         diag["evaluated"] += 1
-
-        # Liquidity & price floor - MANDATORY pre-filter (cannot be disabled).
-        # Rejects penny stocks and illiquid names that can't be traded
-        # without massive slippage.
-        liq_ok, price_val, avg_vol_val = check_liquidity(df, cfg)
-        if not liq_ok:
-            continue
-        diag["liquidity_ok"] += 1
-
-        # 52-week uptrend pre-filter (OPTIONAL, default OFF).
-        # When enabled, rejects stocks not in a confirmed long-term uptrend.
-        if not check_52w_uptrend(df, cfg):
-            continue
-        diag["uptrend_52w_ok"] += 1
-
-        # Beta computed for informational display only - NOT used for filtering.
-        beta_val = compute_beta(df, spy_df, lookback=252)
-
-        # Sector strength
-        sector_ok = True
-        if cfg["macro"]["enabled"]:
-            sector_ok, _ = check_sector_strength(ticker, cfg, data_cache)
-            if not sector_ok:
-                continue
-        diag["sector_rs_ok"] += 1
-
-        # Run each filter
-        checks = {
-            "ma_alignment":     check_ma_alignment(df, cfg),
-            "obv_breakout":     check_obv_breakout(df, cfg),
-            "keltner_breakout": check_keltner_breakout(df, cfg),
-            "volume_surge":     check_volume_surge(df, cfg),
-            "whipsaw_filter":   check_whipsaw_filter(df, cfg),
-            "divergence_ok":    check_divergence_blocker(df, cfg),
-            "pullback_trigger": check_pullback_trigger(df, cfg),
-            "reversal_trigger": check_reversal_trigger(df, cfg),
-        }
-        for k, v in checks.items():
-            if v:
-                diag[k] += 1
-
-        # Score: % of ENABLED filters that this ticker passed
-        if enabled_filters:
-            passed_enabled = sum(1 for k in enabled_filters if checks.get(k, False))
-            score = round(passed_enabled / len(enabled_filters) * 100, 1)
-        else:
-            score = 100.0
-
-        passed_labels = [filter_labels[k] for k in enabled_filters if checks.get(k, False)]
-        failed_labels = [filter_labels[k] for k in enabled_filters if not checks.get(k, False)]
-
-        entry = float(df["Close"].iloc[-1])
-
-        candidate = {
-            "Ticker":     ticker,
-            "Score":      score,
-            "Price":      round(entry, 2),
-            "Beta":       round(beta_val, 2) if beta_val is not None else None,
-            "Passed":     ", ".join(passed_labels) if passed_labels else "—",
-            "Failed":     ", ".join(failed_labels) if failed_labels else "—",
-        }
-        candidates.append(candidate)
-
-        # Did ALL enabled filters pass?
-        all_ok = all(checks.get(k, True) for k in enabled_filters)
-        if not all_ok:
-            continue
-        diag["all_filters_ok"] += 1
-
-        # Risk gating
-        stop = calculate_initial_stop(df, cfg)
-        if stop >= entry:
-            continue
-        diag["valid_stop"] += 1
-        target = calculate_target(df, entry, cfg)
-        rr_ok, rr = check_rr_ratio(entry, stop, target, cfg)
-        if not rr_ok:
-            continue
-        diag["rr_ok"] += 1
-        shares = calculate_position_size(entry, stop, cfg)
-        if shares <= 0:
+        passed, details = check_iron_filter(ticker, df, cfg, data_cache)
+        if details.get("passed_1"): diag["passed_liquidity"] += 1
+        if details.get("passed_2"): diag["passed_sector_rs"] += 1
+        if details.get("passed_3"): diag["passed_ma"] += 1
+        if details.get("passed_4"): diag["passed_hh_hl"] += 1
+        if details.get("passed_5"): diag["passed_vol_conf"] += 1
+        if not passed:
             continue
         diag["final"] += 1
-
-        signals.append({
-            "Ticker":        ticker,
-            "Score":         score,
-            "Entry_Price":   round(entry, 2),
-            "Initial_Stop":  round(stop, 2),
-            "Target":        round(target, 2),
-            "R_R_Ratio":     round(rr, 2),
-            "Shares_To_Buy": shares,
-            "Risk_$":        round((entry - stop) * shares, 2),
-            "Beta":          round(beta_val, 2) if beta_val is not None else None,
+        fib = details["fib"]
+        rows.append({
+            "Ticker":            ticker,
+            "Price":             round(details["price"], 2),
+            "Wave_Low":          round(fib["wave_low"], 2),
+            "Wave_Low_Date":     fib["wave_low_date"].strftime("%Y-%m-%d"),
+            "Wave_High":         round(fib["wave_high"], 2),
+            "Wave_High_Date":    fib["wave_high_date"].strftime("%Y-%m-%d"),
+            "Wave_Size_%":       round(fib["wave_size_pct"], 1),
+            "Fib_23.6%":         round(fib["fib_23_6"], 2),
+            "Fib_38.2%":         round(fib["fib_38_2"], 2),
+            "Fib_50.0%":         round(fib["fib_50_0"], 2),
+            "Fib_61.8%":         round(fib["fib_61_8"], 2),
+            "Current_Retrace_%": round(fib["current_retracement_pct"], 1),
+            "Days_Since_High":   fib["days_since_high"],
+            "Vol_Ratio":         round(details["vol_ratio"], 2) if details.get("vol_ratio") else None,
+            "Sector_RS":         round(details["sector_ratio"], 2) if details.get("sector_ratio") else None,
         })
-
-    # Near-misses: top 10 candidates that did NOT make it to signals,
-    # sorted by score descending (highest score first), then price.
-    signal_tickers = {s["Ticker"] for s in signals}
-    near_misses = sorted(
-        [c for c in candidates if c["Ticker"] not in signal_tickers],
-        key=lambda x: (-x["Score"], x["Ticker"]),
-    )[:10]
-
-    return {
-        "signals":        pd.DataFrame(signals),
-        "near_misses":    pd.DataFrame(near_misses),
-        "diagnostics":    diag,
-        "all_candidates": pd.DataFrame(candidates),
-    }
+    df_out = pd.DataFrame(rows)
+    if not df_out.empty:
+        df_out = df_out.sort_values("Current_Retrace_%", ascending=True).reset_index(drop=True)
+    return {"passers": df_out, "diagnostics": diag}
 
 
-def evaluate_portfolio(cfg: dict, data_cache: dict, portfolio: pd.DataFrame) -> pd.DataFrame:
+# ==============================================================================
+# PORTFOLIO
+# ==============================================================================
+def evaluate_portfolio(cfg: dict, data_cache: dict, portfolio_df: pd.DataFrame) -> pd.DataFrame:
+    if portfolio_df is None or portfolio_df.empty:
+        return pd.DataFrame()
     rows = []
-    for _, pos in portfolio.iterrows():
+    today = datetime.now()
+    for _, pos in portfolio_df.iterrows():
         ticker = pos["Ticker"]
         df = data_cache.get(ticker)
         if df is None or df.empty:
-            rows.append({"Ticker": ticker, "Current_Price": np.nan,
-                         "Trailing_Stop": np.nan, "Action": "DATA_MISSING"})
+            rows.append({
+                "Ticker": ticker, "Entry_Price": pos["Entry_Price"],
+                "Current_Price": None, "P_L_%": None, "Days_Held": None,
+                "Trailing_Stop": None, "ATR": None, "Status": "no data",
+            })
             continue
-        prior_stop = pos.get("Current_Stop", None)
-        tstop = calculate_trailing_stop(df, pos["Entry_Date"], prior_stop, cfg)
         current = float(df["Close"].iloc[-1])
-        sell = check_volume_exit(df, tstop)
+        entry   = float(pos["Entry_Price"])
+        pl_pct  = (current - entry) / entry * 100
+        days_held = None
+        if "Entry_Date" in pos and pd.notna(pos["Entry_Date"]):
+            days_held = (today - pos["Entry_Date"]).days
+        atr = None; trailing = None
+        if "ATR" in df.columns and not pd.isna(df["ATR"].iloc[-1]):
+            atr = float(df["ATR"].iloc[-1])
+            recent_low = float(df["Low"].tail(10).min())
+            trailing = max(recent_low - cfg["risk"]["atr_stop_multiplier"] * atr, entry * 0.90)
         rows.append({
-            "Ticker":        ticker,
-            "Entry_Price":   pos["Entry_Price"],
-            "Entry_Date":    pd.to_datetime(pos["Entry_Date"]).date(),
-            "Current_Price": round(current, 2),
-            "Trailing_Stop": round(tstop, 2),
-            "Unrealized_%":  round((current / pos["Entry_Price"] - 1) * 100, 2),
-            "Action":        "SELL" if sell else "HOLD",
+            "Ticker":         ticker,
+            "Entry_Price":    round(entry, 2),
+            "Current_Price":  round(current, 2),
+            "P_L_%":          round(pl_pct, 2),
+            "Days_Held":      days_held,
+            "Trailing_Stop":  round(trailing, 2) if trailing else None,
+            "ATR":            round(atr, 2) if atr else None,
+            "Status":         ("below stop ⚠️" if (trailing and current < trailing) else "OK ✅"),
         })
     return pd.DataFrame(rows)
 
 
-def evaluate_best_of_all_profiles(base_cfg: dict, data_cache: dict, top_n: int = 5) -> dict:
-    """
-    Run ALL three strategy profiles (breakout, pullback, reversal) against the same
-    data_cache, then return the Top N strongest candidates overall — regardless of
-    which profile flagged them.
-
-    Each candidate is tagged with the profile that produced it. If the same ticker
-    shows up in multiple profiles, we keep the highest-scoring instance.
-
-    Ranking logic:
-      1. Full signals (passed ALL filters, R/R met) ALWAYS rank above near-misses.
-      2. Within signals: rank by R/R ratio descending (best risk/reward first).
-      3. Within near-misses: rank by Score (% of filters passed) descending.
-
-    Returns dict with: top_picks (DataFrame), per_profile (dict of profile -> result),
-                       combined_diagnostics (dict).
-    """
-    profile_keys = ["breakout", "pullback", "reversal"]
-    per_profile = {}
-    combined_diag = {}
-
-    for pk in profile_keys:
-        cfg_p = deepcopy(base_cfg)
-        cfg_p = apply_strategy_profile(cfg_p, pk)
-        res = evaluate_new_signals(cfg_p, data_cache)
-        per_profile[pk] = res
-        # aggregate diagnostics (max across profiles, since each is independent)
-        for k, v in res["diagnostics"].items():
-            combined_diag[k] = max(combined_diag.get(k, 0), v)
-
-    # Collect every candidate from every profile, tagged with profile name
-    all_picks = []
-
-    # ---- Full signals (highest priority) ----
-    for pk in profile_keys:
-        sig_df = per_profile[pk]["signals"]
-        if sig_df.empty:
-            continue
-        for _, row in sig_df.iterrows():
-            d = row.to_dict()
-            d["Profile"] = pk.capitalize()
-            d["Type"] = "✅ SIGNAL"
-            d["Rank_Key"] = (1, float(d.get("R_R_Ratio", 0)))  # higher R/R = better
-            all_picks.append(d)
-
-    # ---- Near-misses (secondary priority) ----
-    for pk in profile_keys:
-        nm_df = per_profile[pk]["near_misses"]
-        if nm_df.empty:
-            continue
-        for _, row in nm_df.iterrows():
-            d = row.to_dict()
-            d["Profile"] = pk.capitalize()
-            d["Type"] = "🎯 NEAR-MISS"
-            d["Rank_Key"] = (0, float(d.get("Score", 0)))  # higher Score = better
-            all_picks.append(d)
-
-    # ---- Deduplicate by ticker (keep best version) ----
-    best_by_ticker = {}
-    for p in all_picks:
-        t = p["Ticker"]
-        if t not in best_by_ticker or p["Rank_Key"] > best_by_ticker[t]["Rank_Key"]:
-            best_by_ticker[t] = p
-
-    # ---- Sort overall: signals > near-misses, then by rank key ----
-    ranked = sorted(best_by_ticker.values(),
-                    key=lambda x: x["Rank_Key"], reverse=True)
-    top = ranked[:top_n]
-
-    # Drop helper column before returning
-    for d in top:
-        d.pop("Rank_Key", None)
-
-    top_df = pd.DataFrame(top) if top else pd.DataFrame()
-    return {
-        "top_picks":            top_df,
-        "per_profile":          per_profile,
-        "combined_diagnostics": combined_diag,
-    }
-
-
+# ==============================================================================
+# RUN SCANNER
+# ==============================================================================
 def run_scanner(
     config: dict,
     portfolio_df: Optional[pd.DataFrame] = None,
     progress_cb: Optional[Callable[[float, str], None]] = None,
     status_cb:   Optional[Callable[[str], None]] = None,
 ) -> dict:
-    """
-    Run the full pipeline. Both callbacks are optional and used by the UI.
-        progress_cb(fraction_0_to_1, message_str)
-        status_cb(message_str)
-    """
+    import time
     cfg = deepcopy(config)
-    def _p(f, m=""):
-        if progress_cb: progress_cb(min(max(f, 0.0), 1.0), m)
+    def _p(f, m):
+        if progress_cb: progress_cb(f, m)
     def _s(m):
         if status_cb: status_cb(m)
 
-    # 1) Macro
-    _p(0.05, "Checking macro environment...")
-    macro_ok, macro_info = macro_kill_switch(cfg)
-    _s(f"Macro: {macro_info.get('overall', 'n/a')}")
+    all_tickers = list(cfg["universe"])
+    if cfg["macro"]["enabled"]:
+        all_tickers.append(cfg["macro"]["spy_ticker"])
+        if cfg["macro"]["vix_enabled"]:
+            all_tickers.append(cfg["macro"]["vix_ticker"])
+        if cfg["macro"]["vxv_enabled"]:
+            all_tickers.append(cfg["macro"]["vxv_ticker"])
+        if cfg["macro"]["sector_rs_enabled"]:
+            all_tickers.extend(ALL_SECTOR_ETFS)
+    if portfolio_df is not None and not portfolio_df.empty:
+        all_tickers.extend(portfolio_df["Ticker"].tolist())
+    all_tickers = sorted(set(all_tickers))
 
-    # 2) Build full ticker set: universe + portfolio + sector ETFs + SPY
-    portfolio = load_portfolio(portfolio_df) if portfolio_df is not None else pd.DataFrame(
-        columns=["Ticker", "Entry_Price", "Entry_Date"])
-    sector_etfs = set(cfg["sector_map"].values())
-    sector_etfs.add(cfg["macro"]["spy_ticker"])
-
-    all_tickers = sorted(set(cfg["universe"]) |
-                         set(portfolio["Ticker"].tolist()) |
-                         sector_etfs)
-
-    # 3) Batched OHLCV download
-    import time
+    _p(0.05, f"Preparing {len(all_tickers)} symbols…")
     t0 = time.time()
-    _p(0.10, f"Fetching OHLCV for {len(all_tickers)} symbols...")
-    raw_cache = fetch_ohlcv_batch(
-        all_tickers, period=cfg["history_period"], status_cb=status_cb,
-    )
-    t_download = time.time() - t0
-    _s(f"Fetched {len(raw_cache)}/{len(all_tickers)} symbols in {t_download:.1f}s")
+    _p(0.10, "Downloading OHLCV from Yahoo…")
+    raw = fetch_ohlcv_batch(all_tickers, period=cfg["history_period"], status_cb=status_cb)
+    t_dl = time.time() - t0
+    _s(f"Fetched {len(raw)}/{len(all_tickers)} in {t_dl:.1f}s")
 
-    # 4) Enrich with indicators
     t1 = time.time()
-    _p(0.70, "Computing indicators...")
-    data_cache = {}
-    skipped_short = 0
-    for t, df in raw_cache.items():
+    _p(0.65, "Computing indicators…")
+    cache = {}
+    skipped = 0
+    for t, df in raw.items():
         if len(df) < 50:
-            skipped_short += 1
-            continue
+            skipped += 1; continue
         try:
-            data_cache[t] = add_indicators(df, cfg)
+            cache[t] = add_indicators(df, cfg)
         except Exception:
             continue
-    t_indicators = time.time() - t1
+    t_ind = time.time() - t1
 
-    # 5) Module 2 (gated by macro)
+    _p(0.75, "Evaluating macro regime…")
+    macro_ok, macro_info = get_macro_snapshot(cfg, cache)
+
     t2 = time.time()
-    _p(0.85, "Screening universe...")
-    best_of_all_result = None  # populated only in best_of_all mode
+    _p(0.85, "Running iron filter on universe…")
     if macro_ok:
-        if cfg.get("best_of_all_mode", False):
-            # Run all 3 profiles and find Top 5 overall
-            _s("Best-of-All mode: evaluating breakout, pullback, and reversal profiles...")
-            best_of_all_result = evaluate_best_of_all_profiles(cfg, data_cache, top_n=5)
-            # For the main "new_signals" output, we still show the signals from
-            # the user's currently-selected profile (used by other tabs).
-            scan_result = evaluate_new_signals(cfg, data_cache)
-            new_signals  = scan_result["signals"]
-            near_misses  = scan_result["near_misses"]
-            diagnostics  = scan_result["diagnostics"]
-        else:
-            scan_result = evaluate_new_signals(cfg, data_cache)
-            new_signals  = scan_result["signals"]
-            near_misses  = scan_result["near_misses"]
-            diagnostics  = scan_result["diagnostics"]
+        scan = evaluate_iron_filter_universe(cfg, cache)
+        passers = scan["passers"]; diag = scan["diagnostics"]
     else:
-        new_signals  = pd.DataFrame()
-        near_misses  = pd.DataFrame()
-        diagnostics  = {}
-    t_screen = time.time() - t2
+        passers = pd.DataFrame(); diag = {}
+    t_sc = time.time() - t2
 
-    # 6) Module 3 (always run; risk mgmt must work even when macro fails)
-    _p(0.95, "Evaluating portfolio...")
-    portfolio_updates = evaluate_portfolio(cfg, data_cache, portfolio)
+    _p(0.95, "Evaluating portfolio…")
+    portfolio = evaluate_portfolio(cfg, cache, portfolio_df)
 
     _p(1.0, "Done.")
     return {
-        "new_signals":       new_signals,
-        "near_misses":       near_misses,
-        "best_of_all":       best_of_all_result,
-        "portfolio_updates": portfolio_updates,
-        "diagnostics":       diagnostics,
+        "passers":           passers,
+        "portfolio_updates": portfolio,
+        "diagnostics":       diag,
         "macro":             macro_info,
         "macro_ok":          macro_ok,
-        "data_cache":        data_cache,
+        "data_cache":        cache,
         "timestamp":         datetime.now(),
         "stats": {
             "requested":      len(all_tickers),
-            "downloaded":     len(raw_cache),
-            "indicators_ok":  len(data_cache),
-            "skipped_short":  skipped_short,
-            "t_download_s":   round(t_download, 1),
-            "t_indicators_s": round(t_indicators, 1),
-            "t_screen_s":     round(t_screen, 1),
+            "downloaded":     len(raw),
+            "indicators_ok":  len(cache),
+            "skipped_short":  skipped,
+            "t_download_s":   round(t_dl, 1),
+            "t_indicators_s": round(t_ind, 1),
+            "t_screen_s":     round(t_sc, 1),
         },
     }
