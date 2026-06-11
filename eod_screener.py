@@ -148,9 +148,7 @@ def fetch_ohlcv_batch(tickers: list[str], period: str = "2y",
         try:
             data = yf.download(chunk, period=period, interval="1d",
                                group_by="ticker", auto_adjust=False,
-                               prepost=False, actions=False,
-                               progress=False, threads=True,
-                               repair=True)
+                               progress=False, threads=True)
         except Exception:
             continue
         for t in chunk:
