@@ -147,7 +147,7 @@ def fetch_ohlcv_batch(tickers: list[str], period: str = "2y",
             status_cb(f"Downloading {chunk_idx+1}–{min(chunk_idx+chunk_size,len(tickers))} of {len(tickers)}…")
         try:
             data = yf.download(chunk, period=period, interval="1d",
-                               group_by="ticker", auto_adjust=True,
+                               group_by="ticker", auto_adjust=False,
                                progress=False, threads=True)
         except Exception:
             continue
