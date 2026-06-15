@@ -363,16 +363,49 @@ if result is not None:
             )
         else:
             st.markdown(f"### 🎯 {len(passers)} stock(s) passed Murphy's Iron Filter")
+
+            # Setup type summary
+            if "Setup" in passers.columns:
+                setup_counts = passers["Setup"].value_counts()
+                summary_cols = st.columns(len(setup_counts))
+                for col, (setup_name, count) in zip(summary_cols, setup_counts.items()):
+                    col.metric(setup_name, count)
+
+                # Setup filter
+                all_setups = sorted(passers["Setup"].unique().tolist())
+                selected_setups = st.multiselect(
+                    "Filter by setup type (empty = all)",
+                    all_setups,
+                    default=[],
+                    help="🚀 Momentum = shallow pullback (<25%) · "
+                         "📊 At SMA50/SMA200 = touching key support · "
+                         "💎 Classical = ~38.2% retrace · "
+                         "💎 Deep = 50%-61.8% retrace",
+                )
+                if selected_setups:
+                    passers_filtered = passers[passers["Setup"].isin(selected_setups)]
+                    st.caption(f"Showing **{len(passers_filtered)}** of {len(passers)} stocks")
+                else:
+                    passers_filtered = passers
+            else:
+                passers_filtered = passers
+
             st.caption("Sorted by current retracement % (smallest pullback = strongest stock). "
-                       "Each row shows the rising-wave measurement, the 4 Fibonacci retracement "
-                       "targets, and the live retracement %.")
+                       "Each row shows the setup type, distances from SMAs, the rising-wave "
+                       "measurement, the 4 Fibonacci retracement targets, and the live retracement %.")
 
             st.dataframe(
-                passers,
+                passers_filtered,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
+                    "Setup":              st.column_config.TextColumn("Setup",
+                                            help="Type of Murphy setup: Momentum, SMA support, or Fib retrace"),
                     "Price":              st.column_config.NumberColumn("Price",  format="$%.2f"),
+                    "Dist_SMA50_%":       st.column_config.NumberColumn("vs SMA50", format="%.1f%%",
+                                            help="% distance from SMA50 (positive = above)"),
+                    "Dist_SMA200_%":      st.column_config.NumberColumn("vs SMA200", format="%.1f%%",
+                                            help="% distance from SMA200 (positive = above)"),
                     "Wave_Low":           st.column_config.NumberColumn("Wave Low",  format="$%.2f"),
                     "Wave_High":          st.column_config.NumberColumn("Wave High", format="$%.2f"),
                     "Wave_Size_%":        st.column_config.NumberColumn("Wave %",  format="%.1f%%"),
@@ -391,11 +424,10 @@ if result is not None:
 
             st.caption(
                 "📖 **How to read this:** Each stock is in a confirmed uptrend (HH/HL) and "
-                "currently pulling back on lower volume than its rising wave. The Fibonacci "
-                "levels show where classical retracement support might appear. "
-                "**Current Retrace %** tells you how far the pullback has gone — "
-                "23.6% = shallow, 38.2% = classical, 50.0% = Dow midpoint, 61.8% = golden ratio "
-                "(last line of trend defense)."
+                "currently pulling back on lower volume than its rising wave. The **Setup** column "
+                "tells you the type of opportunity — Momentum (recent breakout), SMA support "
+                "(testing the 50 or 200 day average), or a deeper Fibonacci retracement. "
+                "Use the filter above to focus on the setup type you prefer."
             )
 
     # ============================
