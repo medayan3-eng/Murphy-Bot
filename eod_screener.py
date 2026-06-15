@@ -357,6 +357,39 @@ def check_pullback_volume(df: pd.DataFrame, swing_info: dict) -> tuple[bool, Opt
     return ratio < 1.0, ratio
 
 
+def classify_setup_type(df: pd.DataFrame, current_price: float,
+                        current_retrace_pct: float) -> tuple[str, float, float]:
+    """
+    Classify each passing stock into a Murphy setup category.
+    Returns (setup_type_label, dist_sma50_pct, dist_sma200_pct).
+
+    Priority logic (closer to SMA = higher priority):
+      1. 📊 At SMA200  -- price within ±3% of SMA200 (deepest support)
+      2. 📊 At SMA50   -- price within ±3% of SMA50 (primary support)
+      3. 🚀 Momentum   -- shallow retrace (<25%)
+      4. 💎 Classical  -- retrace near 38.2% Fib (25-45%)
+      5. 💎 Deep       -- retrace near 50%-61.8% Fib (>45%)
+    """
+    sma50  = float(df["SMA_fast"].iloc[-1])
+    sma200 = float(df["SMA_slow"].iloc[-1])
+
+    dist_sma50  = (current_price - sma50)  / sma50  * 100 if sma50  > 0 else 0
+    dist_sma200 = (current_price - sma200) / sma200 * 100 if sma200 > 0 else 0
+
+    if abs(dist_sma200) <= 3.0:
+        setup = "📊 At SMA200"
+    elif abs(dist_sma50) <= 3.0:
+        setup = "📊 At SMA50"
+    elif current_retrace_pct < 25:
+        setup = "🚀 Momentum"
+    elif current_retrace_pct < 45:
+        setup = "💎 Classical"
+    else:
+        setup = "💎 Deep Pullback"
+
+    return setup, dist_sma50, dist_sma200
+
+
 def calculate_fibonacci_levels(df: pd.DataFrame, swing_info: dict) -> dict:
     l_i, h_i = swing_info["l_curr_idx"], swing_info["h_curr_idx"]
     wave_low  = float(df["Low"].iloc[l_i])
@@ -453,9 +486,18 @@ def evaluate_iron_filter_universe(cfg: dict, data_cache: dict) -> dict:
             continue
         diag["final"] += 1
         fib = details["fib"]
+
+        # Classify setup type (Momentum / At SMA / Classical / Deep)
+        setup_type, dist_sma50, dist_sma200 = classify_setup_type(
+            df, fib["current_price"], fib["current_retracement_pct"]
+        )
+
         rows.append({
             "Ticker":            ticker,
+            "Setup":             setup_type,
             "Price":             round(details["price"], 2),
+            "Dist_SMA50_%":      round(dist_sma50, 1),
+            "Dist_SMA200_%":     round(dist_sma200, 1),
             "Wave_Low":          round(fib["wave_low"], 2),
             "Wave_Low_Date":     fib["wave_low_date"].strftime("%Y-%m-%d"),
             "Wave_High":         round(fib["wave_high"], 2),
