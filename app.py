@@ -818,7 +818,83 @@ if scan_btn:
         st.session_state.skipped      = skip
         st.session_state.trend_count  = len(df_trend)
         st.session_state.rev_count    = len(df_rev)
-        st.rerun()
+
+        # INLINE RESULTS - shown immediately after scan, no tab switch needed
+        st.markdown('---')
+        trend_n = len(df_trend)
+        rev_n   = len(df_rev)
+        now_str = datetime.now().strftime('%m/%d %H:%M')
+        st.markdown(
+            f'<div class="info-box">'
+            f'<b>Scan complete</b> &nbsp;{now_str} &nbsp;|&nbsp;'
+            f'Processed: <b>{proc}</b> &nbsp;|&nbsp; Skipped: <b>{skip}</b><br><br>'
+            f'<b>Results are shown below AND in the tabs above:</b><br>'
+            f'Trend Following tab: <b>{trend_n}</b> stocks &nbsp;|&nbsp;'
+            f'Mean Reversion tab: <b>{rev_n}</b> stocks'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        # TREND TABLE
+        st.markdown('### Trend Following Results')
+        if trend_n > 0:
+            st.caption(f'{trend_n} stocks passed: Close > SMA50 > SMA200, Volume breakout confirmed, sorted by RS vs SPY')
+            _fmt_t = {
+                'Close $': '${:.2f}', 'SMA50': '${:.2f}', 'SMA200': '${:.2f}',
+                'ATR': '${:.2f}', 'Stop 2xATR': '${:.2f}',
+                'Vol Ratio 5d Max': '{:.2f}x', 'RSI Daily': '{:.1f}',
+                'Dist to Res %': '{:+.1f}%', 'Resistance 6m': '${:.2f}',
+            }
+            def _rsi_col(v):
+                if not isinstance(v, (int, float)): return ''
+                c = '#f85149' if v >= 70 else '#3fb950' if v <= 30 else '#d29922' if v >= 55 else '#c9d1d9'
+                return f'color:{c};font-weight:600;font-family:IBM Plex Mono;font-size:0.78rem;'
+            st.dataframe(
+                df_trend.style
+                    .format(_fmt_t, na_rep='--')
+                    .map(_rsi_col, subset=['RSI Daily'])
+                    .set_properties(**{'background-color':'#161b22','color':'#c9d1d9',
+                                       'font-family':'IBM Plex Mono','font-size':'0.78rem'}),
+                use_container_width=True,
+                height=min(600, 50 + trend_n * 36)
+            )
+            st.download_button('Download Trend CSV', df_trend.to_csv(index=False),
+                               'trend.csv', 'text/csv', key='dl_trend_post')
+        else:
+            st.markdown('<div class="warning-box">No stocks passed all Trend Following criteria.</div>',
+                        unsafe_allow_html=True)
+
+        st.markdown('---')
+
+        # REVERSION TABLE
+        st.markdown('### Mean Reversion Results')
+        if rev_n > 0:
+            _traps = len(df_rev[df_rev['Signal'].str.contains('TRAP', na=False)])
+            _conf  = len(df_rev[df_rev['Signal'].str.contains('Confirmed', na=False)])
+            st.caption(f'{rev_n} stocks with extreme RSI | {_conf} Failure Swings confirmed | {_traps} Breakdown Traps')
+            if _traps > 0:
+                st.markdown(
+                    f'<div class="trap-box">WARNING: {_traps} Institutional Breakdown Traps '
+                    f'- appear oversold but Weekly RSI broke below 50. Institutions are exiting.</div>',
+                    unsafe_allow_html=True
+                )
+            _fmt_r = {
+                'Close $': '${:.2f}', 'SMA50': '${:.2f}', 'SMA200': '${:.2f}',
+                'RSI Daily': '{:.1f}', 'Support 6m': '${:.2f}', 'ATR': '${:.2f}',
+            }
+            st.dataframe(
+                df_rev.style
+                    .format(_fmt_r, na_rep='--')
+                    .set_properties(**{'background-color':'#161b22','color':'#c9d1d9',
+                                       'font-family':'IBM Plex Mono','font-size':'0.78rem'}),
+                use_container_width=True,
+                height=min(600, 50 + rev_n * 36)
+            )
+            st.download_button('Download Reversion CSV', df_rev.to_csv(index=False),
+                               'reversion.csv', 'text/csv', key='dl_rev_post')
+        else:
+            st.markdown('<div class="warning-box">No stocks with extreme RSI found.</div>',
+                        unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════
