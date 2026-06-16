@@ -853,10 +853,23 @@ with tab2:
             'Dist to Res %':    '{:+.1f}%',
             'Resistance 6m':    '${:.2f}',
         }
+        def rsi_color(val):
+            if not isinstance(val, (int, float)):
+                return 'font-family: IBM Plex Mono; font-size: 0.78rem;'
+            if val >= 70:
+                color = '#f85149'
+            elif val <= 30:
+                color = '#3fb950'
+            elif val >= 55:
+                color = '#d29922'
+            else:
+                color = '#c9d1d9'
+            return f'color: {color}; font-weight: 600; font-family: IBM Plex Mono; font-size: 0.78rem;'
+
         st.dataframe(
             df_t.style
                 .format(fmt, na_rep='—')
-                .background_gradient(subset=['RSI Daily'], cmap='RdYlGn', vmin=30, vmax=70)
+                .map(rsi_color, subset=['RSI Daily'])
                 .set_properties(**{
                     'background-color': '#161b22', 'color': '#c9d1d9',
                     'font-family': 'IBM Plex Mono', 'font-size': '0.78rem'
