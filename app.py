@@ -324,15 +324,64 @@ def run_scan(tickers, spy_daily, progress_placeholder, status_placeholder):
 
                 if in_uptrend and vol_confirmed and not near_resistance:
                     dist_res = ((peak_126 - close) / close * 100) if not pd.isna(peak_126) else np.nan
+                    dist_sma50_pct = (close - sma50) / sma50 * 100
+                    sma_spread_pct = (sma50 - sma200) / sma200 * 100
+
+                    # ── MURPHY QUALITY SCORE (0-100) ──
+                    # Designed to rank setups, not just pass/fail them.
+                    score = 0.0
+
+                    # 1) Trend strength: SMA50 vs SMA200 spread (stronger separation = more mature, confirmed trend)
+                    #    capped at 15% spread = max points
+                    score += min(max(sma_spread_pct, 0), 15) / 15 * 25
+
+                    # 2) Relative Strength slope vs SPY (Murphy: RS Ratio momentum)
+                    #    normalize: positive slope scaled, negative slope = 0
+                    if not pd.isna(rs_slope):
+                        score += min(max(rs_slope * 50000, 0), 1) * 25
+
+                    # 3) Volume confirmation strength (1.5x min threshold -> 3x = max points)
+                    vol_score = min(max((max_vol_r - 1.5) / (3.0 - 1.5), 0), 1)
+                    score += vol_score * 20
+
+                    # 4) Entry proximity to SMA50 (Murphy: buying near support in an uptrend
+                    #    is preferable to chasing an extended move). Sweet spot: 0% to +8% above SMA50.
+                    if 0 <= dist_sma50_pct <= 8:
+                        proximity_score = 1 - (dist_sma50_pct / 8)
+                    elif dist_sma50_pct > 8:
+                        proximity_score = max(0, 1 - (dist_sma50_pct - 8) / 15)
+                    else:
+                        proximity_score = 0.3  # below SMA50 but still in uptrend = early warning, small credit
+                    score += proximity_score * 15
+
+                    # 5) Distance to resistance (Murphy: more room to run = better risk/reward)
+                    #    sweet spot: 5%-20% room. Too close = already penalized by near_resistance filter.
+                    if not pd.isna(dist_res):
+                        room_score = min(max(dist_res / 20, 0), 1)
+                        score += room_score * 15
+
+                    score = round(min(score, 100), 1)
+
+                    # ── IMMEDIATE ENTRY SETUP FLAG ──
+                    # Fresh volume breakout + still near SMA50 (not extended) + strong RS = actionable now
+                    is_immediate_setup = (
+                        max_vol_r >= 2.0
+                        and 0 <= dist_sma50_pct <= 6
+                        and not pd.isna(rs_slope) and rs_slope > 0
+                        and not pd.isna(dist_res) and dist_res >= 4
+                    )
+
                     trend_results.append({
                         'Ticker':           ticker,
+                        'Score':            score,
+                        'Entry Timing':     "🔥 Immediate Setup" if is_immediate_setup else "Standard / Monitor",
                         'Close $':          round(close, 2),
                         'SMA50':            round(sma50, 2),
                         'SMA200':           round(sma200, 2),
                         'RSI Daily':        round(rsi, 1),
                         'RSI Weekly':       round(w_rsi, 1) if not pd.isna(w_rsi) else None,
                         'Vol Ratio 5d Max': round(max_vol_r, 2),
-                        'RS_Slope':         round(rs_slope, 7) if not pd.isna(rs_slope) else 0,
+                        'Dist SMA50 %':     round(dist_sma50_pct, 1),
                         'Resistance 6m':    round(peak_126, 2) if not pd.isna(peak_126) else None,
                         'Dist to Res %':    round(dist_res, 1) if not pd.isna(dist_res) else None,
                         'ATR':              round(atr, 2),
@@ -345,51 +394,76 @@ def run_scan(tickers, spy_daily, progress_placeholder, status_placeholder):
 
                 if oversold or overbought:
                     flag = ""
-                    priority = 1
+                    is_immediate_setup = False
 
                     if oversold:
                         status_str = "Oversold - Long Candidate"
                         # Institutional Breakdown Trap: Weekly RSI crossed below 50
-                        if not pd.isna(w_rsi) and w_rsi < 50:
-                            flag     = "BREAKDOWN TRAP"
-                            priority = 0
+                        is_trap = (not pd.isna(w_rsi) and w_rsi < 50)
+                        if is_trap:
+                            flag = "BREAKDOWN TRAP"
                         if bull_div:
-                            flag     = "Bullish Failure Swing Confirmed"
-                            priority = 2
+                            flag = "Bullish Failure Swing Confirmed"
+                            # Immediate setup: confirmed reversal pattern, not a trap, weekly not breaking down
+                            is_immediate_setup = not is_trap
+
+                        # ── MURPHY MEAN REVERSION SCORE (0-100) ──
+                        score = 0.0
+                        # 1) RSI extremity: lower RSI = more oversold = higher score (cap at RSI=15)
+                        score += min(max((30 - rsi), 0), 15) / 15 * 30
+                        # 2) Failure Swing confirmed = strongest signal per Murphy p.242
+                        score += 40 if bull_div else 0
+                        # 3) Weekly RSI NOT breaking down = healthier setup
+                        if not pd.isna(w_rsi):
+                            score += min(max((w_rsi - 30), 0), 30) / 30 * 20
+                        # 4) Penalty for breakdown trap
+                        score -= 25 if is_trap else 0
+                        score = round(min(max(score, 0), 100), 1)
+
                     else:
                         status_str = "Overbought - Short Candidate"
                         if bear_div:
-                            flag     = "Bearish Failure Swing Confirmed"
-                            priority = 2
+                            flag = "Bearish Failure Swing Confirmed"
+                            is_immediate_setup = True
+
+                        score = 0.0
+                        score += min(max((rsi - 70), 0), 15) / 15 * 30
+                        score += 40 if bear_div else 0
+                        if not pd.isna(w_rsi):
+                            score += min(max((70 - w_rsi), 0), 30) / 30 * 20
+                        score = round(min(max(score, 0), 100), 1)
 
                     reversion_results.append({
-                        'Ticker':      ticker,
-                        'Close $':     round(close, 2),
-                        'RSI Daily':   round(rsi, 1),
-                        'RSI Weekly':  round(w_rsi, 1) if not pd.isna(w_rsi) else None,
-                        'Status':      status_str,
-                        'Signal':      flag,
-                        'SMA50':       round(sma50, 2),
-                        'SMA200':      round(sma200, 2),
-                        'Support 6m':  round(trough_126, 2) if not pd.isna(trough_126) else None,
-                        'ATR':         round(atr, 2),
-                        '_priority':   priority,
+                        'Ticker':        ticker,
+                        'Score':         score,
+                        'Entry Timing':  "🔥 Immediate Setup" if is_immediate_setup else "Standard / Monitor",
+                        'Close $':       round(close, 2),
+                        'RSI Daily':     round(rsi, 1),
+                        'RSI Weekly':    round(w_rsi, 1) if not pd.isna(w_rsi) else None,
+                        'Status':        status_str,
+                        'Signal':        flag,
+                        'SMA50':         round(sma50, 2),
+                        'SMA200':        round(sma200, 2),
+                        'Support 6m':    round(trough_126, 2) if not pd.isna(trough_126) else None,
+                        'ATR':           round(atr, 2),
                     })
 
             except Exception:
                 skipped += 1
                 continue
 
-    # Sort results
+    # ── RANK & LIMIT TO TOP 20 ──
+    TOP_N = 20
+
     df_trend = pd.DataFrame(trend_results)
     if len(df_trend) > 0:
-        df_trend = df_trend.sort_values('RS_Slope', ascending=False).reset_index(drop=True)
-        df_trend.drop(columns=['RS_Slope'], inplace=True)
+        df_trend = df_trend.sort_values('Score', ascending=False).head(TOP_N).reset_index(drop=True)
+        df_trend.insert(0, 'Rank', range(1, len(df_trend) + 1))
 
     df_rev = pd.DataFrame(reversion_results)
     if len(df_rev) > 0:
-        df_rev = df_rev.sort_values('_priority', ascending=False).reset_index(drop=True)
-        df_rev.drop(columns=['_priority'], inplace=True)
+        df_rev = df_rev.sort_values('Score', ascending=False).head(TOP_N).reset_index(drop=True)
+        df_rev.insert(0, 'Rank', range(1, len(df_rev) + 1))
 
     return df_trend, df_rev, processed, skipped
 
@@ -908,27 +982,49 @@ if scan_btn:
         )
 
         # TREND TABLE
-        st.markdown('### Trend Following Results')
+        st.markdown('### Trend Following Results — Top 20')
         if trend_n > 0:
-            st.caption(f'{trend_n} stocks passed: Close > SMA50 > SMA200, Volume breakout confirmed, sorted by RS vs SPY')
+            n_immediate_t = len(df_trend[df_trend['Entry Timing'].str.contains('Immediate', na=False)])
+            st.caption(
+                f'Ranked 1-{trend_n} by Murphy Quality Score (trend strength, RS momentum, volume, '
+                f'entry proximity, room to resistance). {n_immediate_t} flagged for immediate setup.'
+            )
+            if n_immediate_t > 0:
+                immediate_list = ", ".join(df_trend[df_trend['Entry Timing'].str.contains('Immediate', na=False)]['Ticker'].tolist())
+                st.markdown(
+                    f'<div class="info-box">🔥 <b>{n_immediate_t} Immediate Setup(s):</b> {immediate_list}<br>'
+                    f'Fresh volume breakout (≥2x) + still near SMA50 (within 6%) + positive RS momentum '
+                    f'+ adequate room to resistance (≥4%). Worth checking for entry in the next 1-2 sessions '
+                    f'— continue monitoring as conditions evolve.</div>',
+                    unsafe_allow_html=True
+                )
             _fmt_t = {
                 'Close $': '${:.2f}', 'SMA50': '${:.2f}', 'SMA200': '${:.2f}',
-                'ATR': '${:.2f}', 'Stop 2xATR': '${:.2f}',
+                'ATR': '${:.2f}', 'Stop 2xATR': '${:.2f}', 'Score': '{:.1f}',
                 'Vol Ratio 5d Max': '{:.2f}x', 'RSI Daily': '{:.1f}',
-                'Dist to Res %': '{:+.1f}%', 'Resistance 6m': '${:.2f}',
+                'Dist SMA50 %': '{:+.1f}%', 'Dist to Res %': '{:+.1f}%', 'Resistance 6m': '${:.2f}',
             }
             def _rsi_col(v):
                 if not isinstance(v, (int, float)): return ''
                 c = '#f85149' if v >= 70 else '#3fb950' if v <= 30 else '#d29922' if v >= 55 else '#c9d1d9'
                 return f'color:{c};font-weight:600;font-family:IBM Plex Mono;font-size:0.78rem;'
+            def _entry_col(v):
+                c = '#3fb950' if 'Immediate' in str(v) else '#8b949e'
+                return f'color:{c};font-weight:600;font-family:IBM Plex Mono;font-size:0.78rem;'
+            def _score_col(v):
+                if not isinstance(v, (int, float)): return ''
+                c = '#3fb950' if v >= 70 else '#d29922' if v >= 50 else '#8b949e'
+                return f'color:{c};font-weight:700;font-family:IBM Plex Mono;font-size:0.8rem;'
             st.dataframe(
                 df_trend.style
                     .format(_fmt_t, na_rep='--')
                     .map(_rsi_col, subset=['RSI Daily'])
+                    .map(_entry_col, subset=['Entry Timing'])
+                    .map(_score_col, subset=['Score'])
                     .set_properties(**{'background-color':'#161b22','color':'#c9d1d9',
                                        'font-family':'IBM Plex Mono','font-size':'0.78rem'}),
                 use_container_width=True,
-                height=min(600, 50 + trend_n * 36)
+                height=min(750, 50 + trend_n * 36)
             )
             st.download_button('Download Trend CSV', df_trend.to_csv(index=False),
                                'trend.csv', 'text/csv', key='dl_trend_post')
@@ -939,11 +1035,23 @@ if scan_btn:
         st.markdown('---')
 
         # REVERSION TABLE
-        st.markdown('### Mean Reversion Results')
+        st.markdown('### Mean Reversion Results — Top 20')
         if rev_n > 0:
             _traps = len(df_rev[df_rev['Signal'].str.contains('TRAP', na=False)])
             _conf  = len(df_rev[df_rev['Signal'].str.contains('Confirmed', na=False)])
-            st.caption(f'{rev_n} stocks with extreme RSI | {_conf} Failure Swings confirmed | {_traps} Breakdown Traps')
+            n_immediate_r = len(df_rev[df_rev['Entry Timing'].str.contains('Immediate', na=False)])
+            st.caption(
+                f'Ranked 1-{rev_n} by Murphy Quality Score (RSI extremity, Failure Swing confirmation, '
+                f'weekly RSI health). {_conf} Failure Swings confirmed | {_traps} Breakdown Traps flagged.'
+            )
+            if n_immediate_r > 0:
+                immediate_list = ", ".join(df_rev[df_rev['Entry Timing'].str.contains('Immediate', na=False)]['Ticker'].tolist())
+                st.markdown(
+                    f'<div class="info-box">🔥 <b>{n_immediate_r} Immediate Setup(s):</b> {immediate_list}<br>'
+                    f'Confirmed Failure Swing reversal (price + RSI divergence with price confirmation) — '
+                    f'worth checking for entry in the next 1-2 sessions, with continued monitoring.</div>',
+                    unsafe_allow_html=True
+                )
             if _traps > 0:
                 st.markdown(
                     f'<div class="trap-box">WARNING: {_traps} Institutional Breakdown Traps '
@@ -951,16 +1059,18 @@ if scan_btn:
                     unsafe_allow_html=True
                 )
             _fmt_r = {
-                'Close $': '${:.2f}', 'SMA50': '${:.2f}', 'SMA200': '${:.2f}',
+                'Close $': '${:.2f}', 'SMA50': '${:.2f}', 'SMA200': '${:.2f}', 'Score': '{:.1f}',
                 'RSI Daily': '{:.1f}', 'Support 6m': '${:.2f}', 'ATR': '${:.2f}',
             }
             st.dataframe(
                 df_rev.style
                     .format(_fmt_r, na_rep='--')
+                    .map(_entry_col, subset=['Entry Timing'])
+                    .map(_score_col, subset=['Score'])
                     .set_properties(**{'background-color':'#161b22','color':'#c9d1d9',
                                        'font-family':'IBM Plex Mono','font-size':'0.78rem'}),
                 use_container_width=True,
-                height=min(600, 50 + rev_n * 36)
+                height=min(750, 50 + rev_n * 36)
             )
             st.download_button('Download Reversion CSV', df_rev.to_csv(index=False),
                                'reversion.csv', 'text/csv', key='dl_rev_post')
@@ -975,11 +1085,14 @@ if scan_btn:
 with tab2:
     st.markdown("## 📈 Trend Following Scanner")
     st.markdown("""<div class="info-box">
-    <b>Criteria (Murphy):</b> &nbsp;
+    <b>Filter Criteria (Murphy):</b> &nbsp;
     ✅ Close &gt; SMA50 &gt; SMA200 &nbsp;|&nbsp;
     ✅ Max Volume Ratio 5d ≥ 1.5 (institutional breakout) &nbsp;|&nbsp;
-    ✅ Not within 3% of 6-month horizontal resistance &nbsp;|&nbsp;
-    📊 Sorted by RS Slope vs SPY
+    ✅ Not within 3% of 6-month horizontal resistance<br><br>
+    <b>Top 20 Ranking (Quality Score 0-100):</b> &nbsp;
+    Trend strength (SMA spread) · RS momentum vs SPY · Volume confirmation strength ·
+    Entry proximity to SMA50 · Room to resistance<br>
+    🔥 <b>Immediate Setup</b> = fresh breakout (Vol ≥2x) + near SMA50 (≤6%) + positive RS + room to resistance (≥4%)
     </div>""", unsafe_allow_html=True)
 
     df_t = st.session_state.get('df_trend')
@@ -989,15 +1102,26 @@ with tab2:
             unsafe_allow_html=True
         )
     else:
-        st.markdown(f"**{len(df_t)} stocks passed all criteria**")
+        n_immediate_t = len(df_t[df_t['Entry Timing'].str.contains('Immediate', na=False)])
+        st.markdown(f"**Top {len(df_t)} stocks, ranked by Murphy Quality Score**")
+        if n_immediate_t > 0:
+            immediate_list = ", ".join(df_t[df_t['Entry Timing'].str.contains('Immediate', na=False)]['Ticker'].tolist())
+            st.markdown(
+                f'<div class="info-box">🔥 <b>{n_immediate_t} Immediate Setup(s):</b> {immediate_list}<br>'
+                f'Fresh volume breakout + near SMA50 + positive RS momentum + room to resistance. '
+                f'Worth checking for entry in the next 1-2 sessions, with continued monitoring.</div>',
+                unsafe_allow_html=True
+            )
         fmt = {
             'Close $':          '${:.2f}',
             'SMA50':            '${:.2f}',
             'SMA200':           '${:.2f}',
             'ATR':              '${:.2f}',
             'Stop 2xATR':       '${:.2f}',
+            'Score':            '{:.1f}',
             'Vol Ratio 5d Max': '{:.2f}×',
             'RSI Daily':        '{:.1f}',
+            'Dist SMA50 %':     '{:+.1f}%',
             'Dist to Res %':    '{:+.1f}%',
             'Resistance 6m':    '${:.2f}',
         }
@@ -1013,16 +1137,25 @@ with tab2:
             else:
                 color = '#c9d1d9'
             return f'color: {color}; font-weight: 600; font-family: IBM Plex Mono; font-size: 0.78rem;'
+        def entry_color(v):
+            c = '#3fb950' if 'Immediate' in str(v) else '#8b949e'
+            return f'color:{c};font-weight:600;font-family:IBM Plex Mono;font-size:0.78rem;'
+        def score_color(v):
+            if not isinstance(v, (int, float)): return ''
+            c = '#3fb950' if v >= 70 else '#d29922' if v >= 50 else '#8b949e'
+            return f'color:{c};font-weight:700;font-family:IBM Plex Mono;font-size:0.8rem;'
 
         st.dataframe(
             df_t.style
                 .format(fmt, na_rep='—')
                 .map(rsi_color, subset=['RSI Daily'])
+                .map(entry_color, subset=['Entry Timing'])
+                .map(score_color, subset=['Score'])
                 .set_properties(**{
                     'background-color': '#161b22', 'color': '#c9d1d9',
                     'font-family': 'IBM Plex Mono', 'font-size': '0.78rem'
                 }),
-            use_container_width=True, height=520
+            use_container_width=True, height=750
         )
         st.download_button("📥 Download CSV", df_t.to_csv(index=False), "trend.csv", "text/csv")
 
@@ -1033,10 +1166,12 @@ with tab2:
 with tab3:
     st.markdown("## 📉 Mean Reversion Scanner")
     st.markdown("""<div class="info-box">
-    <b>Criteria (Murphy p.241-244):</b> &nbsp;
+    <b>Filter Criteria (Murphy p.241-244):</b> &nbsp;
     ✅ Daily RSI &lt; 30 or &gt; 70 &nbsp;|&nbsp;
-    ⚠️ Institutional Breakdown Trap = Weekly RSI crossed below 50 &nbsp;|&nbsp;
-    ✅ Failure Swing = Divergence + price confirmation
+    ⚠️ Institutional Breakdown Trap = Weekly RSI crossed below 50<br><br>
+    <b>Top 20 Ranking (Quality Score 0-100):</b> &nbsp;
+    RSI extremity · Failure Swing confirmation (strongest signal, +40 pts) · Weekly RSI health · Breakdown Trap penalty<br>
+    🔥 <b>Immediate Setup</b> = confirmed Failure Swing (price + RSI divergence with price confirmation) and not a Breakdown Trap
     </div>""", unsafe_allow_html=True)
 
     df_r = st.session_state.get('df_reversion')
@@ -1048,11 +1183,24 @@ with tab3:
     else:
         traps     = df_r[df_r['Signal'].str.contains('TRAP', na=False)]
         confirmed = df_r[df_r['Signal'].str.contains('Confirmed', na=False)]
+        immediate = df_r[df_r['Entry Timing'].str.contains('Immediate', na=False)]
 
-        c1, c2, c3 = st.columns(3)
+        st.markdown(f"**Top {len(df_r)} stocks, ranked by Murphy Quality Score**")
+
+        c1, c2, c3, c4 = st.columns(4)
         c1.markdown(f'<div class="metric-card"><div class="metric-label">Total Extreme RSI</div><div class="metric-value neutral">{len(df_r)}</div></div>', unsafe_allow_html=True)
         c2.markdown(f'<div class="metric-card"><div class="metric-label">Failure Swing Confirmed ✅</div><div class="metric-value green">{len(confirmed)}</div></div>', unsafe_allow_html=True)
-        c3.markdown(f'<div class="metric-card"><div class="metric-label">Breakdown Traps ⚠️</div><div class="metric-value red">{len(traps)}</div></div>', unsafe_allow_html=True)
+        c3.markdown(f'<div class="metric-card"><div class="metric-label">🔥 Immediate Setups</div><div class="metric-value green">{len(immediate)}</div></div>', unsafe_allow_html=True)
+        c4.markdown(f'<div class="metric-card"><div class="metric-label">Breakdown Traps ⚠️</div><div class="metric-value red">{len(traps)}</div></div>', unsafe_allow_html=True)
+
+        if len(immediate) > 0:
+            immediate_list = ", ".join(immediate['Ticker'].tolist())
+            st.markdown(
+                f'<div class="info-box">🔥 <b>{len(immediate)} Immediate Setup(s):</b> {immediate_list}<br>'
+                f'Confirmed Failure Swing reversal — worth checking for entry in the next 1-2 sessions, '
+                f'with continued monitoring.</div>',
+                unsafe_allow_html=True
+            )
 
         if len(traps) > 0:
             st.markdown(
@@ -1065,18 +1213,29 @@ with tab3:
             'Close $':    '${:.2f}',
             'SMA50':      '${:.2f}',
             'SMA200':     '${:.2f}',
+            'Score':      '{:.1f}',
             'RSI Daily':  '{:.1f}',
             'Support 6m': '${:.2f}',
             'ATR':        '${:.2f}',
         }
+        def entry_color3(v):
+            c = '#3fb950' if 'Immediate' in str(v) else '#8b949e'
+            return f'color:{c};font-weight:600;font-family:IBM Plex Mono;font-size:0.78rem;'
+        def score_color3(v):
+            if not isinstance(v, (int, float)): return ''
+            c = '#3fb950' if v >= 70 else '#d29922' if v >= 50 else '#8b949e'
+            return f'color:{c};font-weight:700;font-family:IBM Plex Mono;font-size:0.8rem;'
+
         st.dataframe(
             df_r.style
                 .format(fmt_r, na_rep='—')
+                .map(entry_color3, subset=['Entry Timing'])
+                .map(score_color3, subset=['Score'])
                 .set_properties(**{
                     'background-color': '#161b22', 'color': '#c9d1d9',
                     'font-family': 'IBM Plex Mono', 'font-size': '0.78rem'
                 }),
-            use_container_width=True, height=520
+            use_container_width=True, height=750
         )
         st.download_button("📥 Download CSV", df_r.to_csv(index=False), "reversion.csv", "text/csv")
 
