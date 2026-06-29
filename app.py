@@ -433,6 +433,43 @@ def get_market_data():
     return results, benchmarks, intermarket, sectors
 
 
+@st.cache_data(ttl=1800)
+def get_sector_smas(sector_tickers):
+    """
+    Downloads 1 year of daily data for sector ETFs and computes
+    SMA20, SMA50, SMA200 plus price position relative to each (Murphy trend filter).
+    """
+    sma_results = {}
+    try:
+        raw = yf.download(
+            ' '.join(sector_tickers), period='14mo', interval='1d',
+            progress=False, auto_adjust=True, group_by='ticker', threads=True
+        )
+        for t in sector_tickers:
+            try:
+                df_t = raw[t].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw.dropna()
+                if len(df_t) < 25:
+                    continue
+                close = df_t['Close']
+                last_close = close.iloc[-1]
+                sma20  = close.rolling(20).mean().iloc[-1]
+                sma50  = close.rolling(50).mean().iloc[-1] if len(df_t) >= 50 else np.nan
+                sma200 = close.rolling(200).mean().iloc[-1] if len(df_t) >= 200 else np.nan
+                sma_results[t] = {
+                    'sma20':  round(sma20, 2)  if not pd.isna(sma20)  else None,
+                    'sma50':  round(sma50, 2)  if not pd.isna(sma50)  else None,
+                    'sma200': round(sma200, 2) if not pd.isna(sma200) else None,
+                    'above20':  bool(last_close > sma20)  if not pd.isna(sma20)  else None,
+                    'above50':  bool(last_close > sma50)  if not pd.isna(sma50)  else None,
+                    'above200': bool(last_close > sma200) if not pd.isna(sma200) else None,
+                }
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return sma_results
+
+
 # ─────────────────────────────────────────────
 # 6. CHART & EXECUTION
 # ─────────────────────────────────────────────
@@ -740,15 +777,26 @@ with tab1:
         '<div class="section-header">🔄 Sector Rotation (sorted by weekly performance)</div>',
         unsafe_allow_html=True
     )
+    sma_data = get_sector_smas(list(scts.keys()))
+
     sec_rows = []
     for t, n in scts.items():
         if t in mdata:
             d = mdata[t]
+            s = sma_data.get(t, {})
             sec_rows.append({
-                'ETF':    f"{t} – {n}",
-                'Price':  f"${d['close']:,.2f}",
-                'Day %':  d['chg_d'],
-                'Week %': d['chg_w'],
+                'ETF':     f"{t} – {n}",
+                'Price':   f"${d['close']:,.2f}",
+                'Day %':   d['chg_d'],
+                'Week %':  d['chg_w'],
+                'SMA20':   s.get('sma20'),
+                'SMA50':   s.get('sma50'),
+                'SMA200':  s.get('sma200'),
+                'Trend':   (
+                    "Strong ↑" if s.get('above20') and s.get('above50') and s.get('above200')
+                    else "Strong ↓" if s.get('above20') is False and s.get('above50') is False and s.get('above200') is False
+                    else "Mixed"
+                ) if s.get('above20') is not None else "—",
             })
     if sec_rows:
         df_s = pd.DataFrame(sec_rows).sort_values('Week %', ascending=False)
@@ -759,13 +807,37 @@ with tab1:
                 return f'color: {c}; font-family: IBM Plex Mono; font-size: 0.8rem;'
             return 'font-family: IBM Plex Mono; font-size: 0.8rem;'
 
+        def color_trend(val):
+            if val == "Strong ↑":
+                c = '#3fb950'
+            elif val == "Strong ↓":
+                c = '#f85149'
+            else:
+                c = '#d29922'
+            return f'color: {c}; font-weight: 600; font-family: IBM Plex Mono; font-size: 0.78rem;'
+
         st.dataframe(
             df_s.style
-                .format({'Day %': '{:+.2f}%', 'Week %': '{:+.2f}%'})
+                .format({
+                    'Day %': '{:+.2f}%', 'Week %': '{:+.2f}%',
+                    'SMA20': '${:.2f}', 'SMA50': '${:.2f}', 'SMA200': '${:.2f}',
+                }, na_rep='—')
                 .map(color_pct, subset=['Day %', 'Week %'])
-                .set_properties(**{'background-color': '#161b22', 'color': '#c9d1d9'}),
-            use_container_width=True, height=370
+                .map(color_trend, subset=['Trend'])
+                .set_properties(**{'background-color': '#161b22', 'color': '#c9d1d9',
+                                   'font-family': 'IBM Plex Mono', 'font-size': '0.8rem'}),
+            use_container_width=True, height=420
         )
+        st.caption(
+            "Trend (Murphy): **Strong ↑** = Price above SMA20, SMA50 AND SMA200 · "
+            "**Strong ↓** = Price below all three · **Mixed** = partial alignment"
+        )
+        st.download_button(
+            "📥 Download Sector Data CSV",
+            df_s.to_csv(index=False),
+            "sector_rotation.csv", "text/csv", key="dl_sector_csv"
+        )
+
 
     c1, c2 = st.columns(2)
     with c1:
